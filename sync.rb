@@ -47,12 +47,14 @@ end
 if $packaged
   at_exit do
     next if $exiting
-    puts "Press any key to exit"
-    STDIN.getc
+    STDOUT.flush
+    sleep 0.5
+    puts "Press enter key to exit"
+    gets
   end
 end
 
-PT_SYNC_VERSION = 0.3
+PT_SYNC_VERSION = 0.4
 
 DEFAULT_CONFIG = {
     'hash_server' => 'http://67.164.96.34:81/hashes.txt',
@@ -71,9 +73,17 @@ DEFAULT_CONFIG = {
 
 USER_AGENT = 'PTSync-Ruby'
 
+YAML::ENGINE.yamler = 'syck'
+
+def load_config
+  YAML.load_file('config.yml')
+rescue Exception => ex
+  fail "Unable to parse config file: #{ex.message}"
+end
+
 $config = DEFAULT_CONFIG
-if config = File.exists?('config.yml') && YAML.load_file('config.yml')
-  $config.rmerge!(config)
+if File.exists?('config.yml')
+  $config.rmerge!(load_config)
 else
   open('config.yml', 'w') do |file|
     YAML.dump(DEFAULT_CONFIG, file)
@@ -83,26 +93,26 @@ end
 $argv = ARGV.dup
 
 $opts = Trollop::options do
-  opt 'verbose', 'Print extended information'
-  opt 'watch', 'Check for updates periodically'
-  opt 'create-dir', 'Creates the local NS2 directory'
-  opt 'no-delete', 'Ignore additional/removed files'
-  opt 'delete', 'Delete additional files without asking'
-  opt 'exclude-excludes', 'No not sync the .excludes directory'
-  opt 'dir', 'Local NS2 Directory', :type => :string
-  opt 'host', 'S3 host address', :type => :string
-  opt 'id-key', 'S3 ID key', :type => :string
-  opt 'secret-key', 'S3 secret key', :type => :string
-  opt 'bucket', 'S3 bucket to sync with', :type => :string, :default => $config.s3.bucket
-  opt 'concurrency', 'Max concurrent connections', :default => $config.max_concurrency
-  opt 'max-speed', 'Rough download speed limit in KB/s', :default => -1
+  opt :verbose, 'Print extended information'
+  opt :watch, 'Check for updates periodically'
+  opt :createdir, 'Creates the local NS2 directory'
+  opt :nodelete, 'Ignore additional/removed files'
+  opt :delete, 'Delete additional files without asking'
+  opt :noexcludes, 'No not sync the .excludes directory'
+  opt :dir, 'Local NS2 Directory', :type => :string
+  opt :host, 'S3 host address', :type => :string
+  opt :idkey, 'S3 ID key', :type => :string
+  opt :secretkey, 'S3 secret key', :type => :string
+  opt :bucket, 'S3 bucket to sync with', :type => :string, :default => $config.s3.bucket
+  opt :concurrency, 'Max concurrent connections', :default => $config.max_concurrency
+  opt :maxspeed, 'Rough download speed limit in KB/s', :default => -1
 end
 
-$verbose = $opts['verbose']
-$config.local_directory = "#{$opts['dir']}" if $opts['dir']
-$config.s3.bucket = "#{$opts['bucket']}" if $opts['bucket']
-$config.max_concurrency = $opts['concurrency'] if $opts['concurrency']
-$config.max_speed = $opts['max-speed'] if $opts['max-speed']
+$verbose = $opts[:verbose]
+$config.local_directory = "#{$opts[:dir]}" if $opts[:dir]
+$config.s3.bucket = "#{$opts[:bucket]}" if $opts[:bucket]
+$config.max_concurrency = $opts[:concurrency] if $opts[:concurrency]
+$config.max_speed = $opts[:maxspeed] if $opts[:maxspeed]
 $config.max_speed *= 1024.0 if $config.max_speed? && $config.max_speed > 0
 
 if !$config.s3.id_key? || $config.s3.id_key == '' || $config.s3.id_key == 'id key goes here'
@@ -129,7 +139,7 @@ $config.local_directory.slice!(-1) if $config.local_directory =~ /[\/\\]$/
 $config.local_directory.gsub!("\\", "/")
 
 unless File.directory? $config.local_directory
-  if $opts['create-dir']
+  if $opts[:createdir]
     log :yellow, "Creating directory: #{$config.local_directory}"
     FileUtils.mkpath($config.local_directory)
   else
@@ -140,11 +150,11 @@ end
 
 $config.s3_item = {
     protocol: 'http',
-    aws_access_key_id: $opts['id-key'] || $config.s3.id_key,
-    aws_secret_access_key: $opts['secret-key'] || $config.s3.secret_key
+    aws_access_key_id: $opts[:idkey] || $config.s3.id_key,
+    aws_secret_access_key: $opts[:secretkey] || $config.s3.secret_key
 }
 
-$config.s3_item[:server] = $opts['host'] if $opts['host']
+$config.s3_item[:server] = $opts[:host] if $opts[:host]
 
 def fetch_hashes
   log :yellow, "Downloading new file hashes..."
@@ -207,7 +217,7 @@ def download_files(sub_paths)
   @last_speeds = []
 
   download_complete = -> do
-    log :green, "Sync complete (#{sub_paths.size} files downloaded)"
+    log :green, "Sync complete (#{total_files_to_download} files downloaded)"
     yield if block_given?
   end
 
@@ -344,11 +354,11 @@ end
 def check_for_redundant_files
   log :yellow, "Checking for redundant files..."
   files_to_delete = Dir[File.join($config.local_directory, '**/*')].reject do |path|
-    next true if $opts['exclude-excludes'] && path[$config.local_directory.size+1..-1] == '.excludes'
+    next true if $opts[:noexcludes] && path[$config.local_directory.size+1..-1] == '.excludes'
     File.directory?(path) || @file_hashes.include?(path[$config.local_directory.size..-1])
   end
 
-  if !$opts['delete'] && files_to_delete.size > $config.max_files_removed_without_warning
+  if !$opts[:delete] && files_to_delete.size > $config.max_files_removed_without_warning
     log :yellow, "First file that needs to be deleted: #{files_to_delete.first}" if $verbose
     loop do
       print "Are you sure you want to delete #{files_to_delete.size} files? [Y/N] "
@@ -366,7 +376,7 @@ def check_for_redundant_files
 end
 
 def check_files
-  check_for_redundant_files unless $opts['no-delete']
+  check_for_redundant_files unless $opts[:nodelete]
 
   log :yellow, "Hashing and comparing #{@file_hashes.size} files..."
 
@@ -375,7 +385,7 @@ def check_files
 
   files_to_download = []
   @file_hashes.each.with_index do |(sub_path, info), i|
-    next if $opts['exclude-excludes'] && sub_path[/^\/?([^\/]+)/, 1] == '.excludes'
+    next if $opts[:noexcludes] && sub_path[/^\/?([^\/]+)/, 1] == '.excludes'
     file_path = File.join($config.local_directory, sub_path)
     if !File.exists?(file_path) || info['hash'] != Digest::MD5.file(file_path).hexdigest
       files_to_download << sub_path[1..-1]
@@ -405,7 +415,7 @@ def update_if_needed(force=false)
   update_hashes_if_needed do |updated_hashes|
     if force || updated_hashes
       check_files do
-        if $opts['watch']
+        if $opts[:watch]
           log :yellow, "Checking for updates again in 5 minutes"
           EM.add_timer(5.minutes) { update_if_needed }
         else
