@@ -59,7 +59,7 @@ def http_request(method, address, options={}, &block)
         catch(:done) { block.arity > 1 ? block.(http, doc) : block.(doc) }
       end
     rescue Exception => ex
-      next if $exiting
+      next if ex.is_a? SystemExit
       log :red, "Exception raised while parsing http response: #{method} #{address} (#{ex.class.name})"
       if options[:allow_failure]
         log :red, "Exception: #{ex.message.gsub(/\r?\n/, ' ')}"
