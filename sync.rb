@@ -54,7 +54,7 @@ if $packaged
   end
 end
 
-PT_SYNC_VERSION = 0.4
+PT_SYNC_VERSION = 0.5
 
 DEFAULT_CONFIG = {
     'hash_server' => 'http://67.164.96.34:81/hashes.txt',
@@ -73,7 +73,7 @@ DEFAULT_CONFIG = {
 
 USER_AGENT = 'PTSync-Ruby'
 
-YAML::ENGINE.yamler = 'syck'
+#YAML::ENGINE.yamler = 'syck'
 
 def load_config
   YAML.load_file('config.yml')
