@@ -23,6 +23,7 @@ require './config'
 Dir.chdir('../') if $packaged
 
 #YAML::ENGINE.yamler = 'syck'
+Encoding.default_external = 'utf-8'
 
 initialize_config
 
@@ -192,6 +193,8 @@ def download_files(sub_paths)
       FileUtils.mkpath(directory_path)
     end
 
+    log :yellow, "Starting download: #{sub_path}" if $verbose
+
     unless (file = open(file_path, 'wb') rescue nil)
       log :red, "Unable to write file: #{sub_path.inspect}"
       @total_files_downloaded -= 1
@@ -205,7 +208,7 @@ def download_files(sub_paths)
     failed = proc do |http|
       error_code = http.response_header['X_AMZ_ERROR_CODE'] || http.response_header.status
       error_message = http.response_header['X_AMZ_ERROR_MESSAGE'] || "status: #{http.response_header.status}"
-      log :red, "Download failed: #{sub_path.inspect} (#{error_message})"
+      log :red, "Download failed: #{sub_path.inspect} (encoding: #{sub_path.encoding}, #{error_message})"
       @downloading_file_count -= 1
       file.close
       if error_code != 'IncorrectEndpoint' && error_code != 400 && error_code != 404
@@ -401,7 +404,7 @@ end
 
 def schedule_next_update
   if $last_client_update_check_at
-    if Time.now - $last_client_update_check_at >= 1.minutes
+    if Time.now - $last_client_update_check_at >= 30.minutes
       update_sync_client_if_needed do
         schedule_next_update
       end

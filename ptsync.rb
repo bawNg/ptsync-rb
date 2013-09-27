@@ -12,7 +12,7 @@ require 'json'
 require 'pp'
 require './helpers'
 
-PT_SYNC_VERSION = 0.9
+PT_SYNC_VERSION = 1.0
 
 $git_repo = File.directory?('./.git')
 
