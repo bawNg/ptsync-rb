@@ -95,10 +95,10 @@ end
 if File.exists? 'cache.dat'
   data = File.binread('cache.dat')
   if data[0] == '{' && data[-1] == '}'
-    log :cyan, '=' * 73
-    log :cyan, ' Looks like your local cache format is outdated and needs to be rebuilt.'
-    log :cyan, ' Please excuse the excess hashing time, this only needs to be once.'
-    log :cyan, '=' * 73
+    log :cyan, '=' * 62
+    log :cyan, ' Your local cache format is outdated and needs to be rebuilt.'
+    log :cyan, ' Hashing could take a while, this only needs to be done once.'
+    log :cyan, '=' * 62
     File.delete('cache.dat')
   else
     load_cached_data(data)
