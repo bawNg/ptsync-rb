@@ -1,112 +1,20 @@
-#!/usr/bin/env ruby
 # encoding: utf-8
 
-require 'i18n'
-require 'active_support/json'
-require 'active_support/core_ext'
-require 'eventmachine'
-require 'em-http-request'
+if __FILE__ == $0
+  puts "This file is not meant to be run directly. You need to run ptsync.rb instead."
+  exit 1
+end
+
 require 'happening'
-require 'trollop'
-require 'fileutils'
 require 'digest/md5'
-require 'json'
 require 'yaml'
-require 'pp'
-require './helpers'
+require './config'
 
-$git_repo = File.directory?('./.git')
-
-if ENV['OS'] == 'Windows_NT'
-  require 'win32console'
-  require 'term/ansicolor'
-  if defined? Term::ANSIColor
-    class String
-      include Term::ANSIColor
-      def colorize(color, *args)
-        send(color.is_a?(Hash) ? color[:color] : color, *args)
-      end
-    end
-  end
-
-  if !$git_repo && File.directory?('../bin') && File.directory?('../lib') && File.directory?('../src')
-    $packaged = true
-    Dir.chdir('../')
-  end
-else
-  require 'colorize'
-end
-
-Signal.trap 'INT' do
-  puts "Exiting..."
-  $exiting = true
-  EM.stop
-  exit 0
-end
-
-if $packaged
-  at_exit do
-    next if $exiting
-    STDOUT.flush
-    sleep 0.5
-    puts "Press enter key to exit"
-    gets
-  end
-end
-
-PT_SYNC_VERSION = 0.5
-
-DEFAULT_CONFIG = {
-    'hash_server' => 'http://67.164.96.34:81/hashes.txt',
-    'max_files_removed_without_warning' => 50,
-    'download_type' => 's3',
-    's3' => {
-        'host' => 's3-website-us-east-1.amazonaws.com',
-        'id_key' => 'id key goes here',
-        'secret_key' => 'secret key goes here',
-        'bucket' => 'ns2build'
-    },
-    'local_directory' => 'E:\\Natural Selection 2',
-    'max_concurrency' => 48,
-    'max_speed' => -1
-}
-
-USER_AGENT = 'PTSync-Ruby'
+Dir.chdir('../') if $packaged
 
 #YAML::ENGINE.yamler = 'syck'
 
-def load_config
-  YAML.load_file('config.yml')
-rescue Exception => ex
-  fail "Unable to parse config file: #{ex.message}"
-end
-
-$config = DEFAULT_CONFIG
-if File.exists?('config.yml')
-  $config.rmerge!(load_config)
-else
-  open('config.yml', 'w') do |file|
-    YAML.dump(DEFAULT_CONFIG, file)
-  end
-end
-
-$argv = ARGV.dup
-
-$opts = Trollop::options do
-  opt :verbose, 'Print extended information'
-  opt :watch, 'Check for updates periodically'
-  opt :createdir, 'Creates the local NS2 directory'
-  opt :nodelete, 'Ignore additional/removed files'
-  opt :delete, 'Delete additional files without asking'
-  opt :noexcludes, 'No not sync the .excludes directory'
-  opt :dir, 'Local NS2 Directory', :type => :string
-  opt :host, 'S3 host address', :type => :string
-  opt :idkey, 'S3 ID key', :type => :string
-  opt :secretkey, 'S3 secret key', :type => :string
-  opt :bucket, 'S3 bucket to sync with', :type => :string, :default => $config.s3.bucket
-  opt :concurrency, 'Max concurrent connections', :default => $config.max_concurrency
-  opt :maxspeed, 'Rough download speed limit in KB/s', :default => -1
-end
+initialize_config
 
 $verbose = $opts[:verbose]
 $config.local_directory = "#{$opts[:dir]}" if $opts[:dir]
@@ -156,6 +64,30 @@ $config.s3_item = {
 
 $config.s3_item[:server] = $opts[:host] if $opts[:host]
 
+@local_file_info = {}
+
+if File.exists? 'cache.dat'
+  cache = JSON.parse(File.read('cache.dat')) rescue { }
+  @file_hashes = cache.hashes if cache.hashes?
+  @hashes_last_modified = Time.parse(cache.last_modified) if cache.last_modified?
+  @hashes_generated_at = cache.date_generated if cache.date_generated?
+  @hashed_local_directory = cache.local_directory if cache.local_directory?
+  if @hashed_local_directory && @hashed_local_directory == $config.local_directory
+    @local_file_info = cache.local_files if cache.local_files?
+  end
+  log :yellow, "Loaded #{@file_hashes.size} remote hashes and #{@local_file_info.size} local hashes from cache" if $verbose
+end
+
+def save_cached_data
+  log :yellow, "Saving cached data to disk..." if $verbose
+  cache = { date_generated: @hashes_generated_at, last_modified: @hashes_last_modified, hashes: @file_hashes }
+  if @hashed_local_directory
+    cache[:local_directory] = @hashed_local_directory
+    cache[:local_files] = @local_file_info
+  end
+  open('cache.dat', 'w') {|f| f << JSON.fast_generate(cache) }
+end
+
 def fetch_hashes
   log :yellow, "Downloading new file hashes..."
 
@@ -165,22 +97,12 @@ def fetch_hashes
     @hashes_generated_at = file_hashes.delete('__DateGeneratedUTC')
     file_hashes.delete('__Server')
     @file_hashes = file_hashes
-    data = { date_generated: @hashes_generated_at, last_modified: @hashes_last_modified, hashes: @file_hashes }
-    open('cache.dat', 'w') {|f| f << JSON.fast_generate(data) }
+    save_cached_data
     yield if block_given?
   end
 end
 
 def update_hashes_if_needed
-  unless @hashes_last_modified
-    if File.exists? 'cache.dat'
-      data = JSON.parse(File.read('cache.dat'))
-      @file_hashes = data.hashes
-      @hashes_last_modified = Time.parse(data.last_modified)
-      @hashes_generated_at = data.date_generated
-    end
-  end
-
   unless @hashes_last_modified
     return fetch_hashes { yield true if block_given? }
   end
@@ -195,6 +117,13 @@ def update_hashes_if_needed
       yield false if block_given?
     end
   end
+end
+
+def after_update
+  log :yellow, "Executing afterupdate command: #{$opts[:afterupdate]}"
+  system($opts[:afterupdate])
+rescue Exception => ex
+  log :red, "Error while executing afterupdate command: #{ex.message} (#{ex.class.name})"
 end
 
 def download_files(sub_paths)
@@ -218,6 +147,7 @@ def download_files(sub_paths)
 
   download_complete = -> do
     log :green, "Sync complete (#{total_files_to_download} files downloaded)"
+    after_update if $opts[:afterupdate]
     yield if block_given?
   end
 
@@ -362,7 +292,7 @@ def check_for_redundant_files
     log :yellow, "First file that needs to be deleted: #{files_to_delete.first}" if $verbose
     loop do
       print "Are you sure you want to delete #{files_to_delete.size} files? [Y/N] "
-      case gets
+      case STDIN.gets
         when /^ye?s?$/i
           delete_files(files_to_delete)
           break
@@ -373,6 +303,22 @@ def check_for_redundant_files
   elsif files_to_delete.size > 0
     delete_files(files_to_delete)
   end
+end
+
+def file_hash(sub_path)
+  file_path = File.join($config.local_directory, sub_path)
+  file_size = File.size(file_path)
+  file_mtime = File.mtime(file_path).to_i
+
+  if cached_file = @local_file_info[sub_path]
+    if file_size == cached_file.fsize && file_mtime == cached_file.mtime
+      return cached_file['hash']
+    end
+  end
+
+  hash = Digest::MD5.file(file_path).hexdigest
+  @local_file_info[sub_path] = { fsize: file_size, mtime: file_mtime, hash: hash }
+  return hash
 end
 
 def check_files
@@ -387,17 +333,23 @@ def check_files
   @file_hashes.each.with_index do |(sub_path, info), i|
     next if $opts[:noexcludes] && sub_path[/^\/?([^\/]+)/, 1] == '.excludes'
     file_path = File.join($config.local_directory, sub_path)
-    if !File.exists?(file_path) || info['hash'] != Digest::MD5.file(file_path).hexdigest
+    if File.exists?(file_path)
+      hash = file_hash(sub_path)
+      if info['hash'] != hash
+        files_to_download << sub_path[1..-1]
+      end
+    else
       files_to_download << sub_path[1..-1]
     end
     if Time.now - last_update_at >= 1
       log :magenta, "Checked #{i+1}/#{@file_hashes.size} files (#{'%.2f' % ((i+1) / @file_hashes.size.to_f * 100)}%)"
       last_update_at = Time.now
     end
-    #if files_to_download.size > 0
-    #  break #debug
-    #end
   end
+
+  @hashed_local_directory = $config.local_directory
+
+  save_cached_data
 
   log :yellow, "Hashing and comparing files took #{'%.2f' % (Time.now - started_at)} seconds."
 
@@ -411,55 +363,28 @@ def check_files
   end
 end
 
+def schedule_next_update
+  if $last_client_update_check_at
+    if Time.now - $last_client_update_check_at >= 1.minutes
+      update_sync_client_if_needed do
+        schedule_next_update
+      end
+      return
+    end
+  end
+  log :yellow, "Checking for updates again in 3 minutes"
+  EM.add_timer(3.minutes) do
+    update_if_needed do
+      schedule_next_update
+    end
+  end
+end
+
 def update_if_needed(force=false)
   update_hashes_if_needed do |updated_hashes|
     if force || updated_hashes
       check_files do
-        if $opts[:watch]
-          log :yellow, "Checking for updates again in 5 minutes"
-          EM.add_timer(5.minutes) { update_if_needed }
-        else
-          EM.stop
-          exit 0
-        end
-      end
-    else
-      yield if block_given?
-    end
-  end
-end
-
-def sync_client_update_available
-  log :yellow, "Checking if PTSync-rb is up to date..."
-  http_request :get, 'http://germ.intoxicated.co.za/ns2/ptsync/version.json', allow_failure: true do |http, response|
-    if response
-      yield response['version'] > PT_SYNC_VERSION, response['files']
-    else
-      log :red, "Warning: Auto update version check failed! (code: #{http.response_header.status})"
-      yield false
-    end
-  end
-end
-
-def update_sync_client_if_needed
-  sync_client_update_available do |update_available, files|
-    if update_available
-      log :green, "There is a new version of PTSync-rb available!"
-      downloaded_files = 0
-      files.each do |file_name|
-        log :yellow, "Downloading PTSync-rb update file: #{file_name}" if $verbose
-        http_request :get, 'http://germ.intoxicated.co.za/ns2/ptsync/' + file_name, parser: 'raw' do |http, contents|
-          open("#{$packaged ? './src' : '.'}/#{file_name}", 'wb') {|f| f << contents }
-          downloaded_files += 1
-          log :cyan, "[#{downloaded_files}/#{files.size}] Sync client files updated"
-          if downloaded_files == files.size
-            log :green, "PTSync-rb updated successfully! Relaunching new version..."
-            Dir.chdir('./src') if $packaged
-            exec_args = [$0, *$argv]
-            exec_args.insert 0, 'ruby' if $0.end_with?('.rb')
-            exec *exec_args
-          end
-        end
+        yield if block_given?
       end
     else
       yield if block_given?
@@ -470,11 +395,12 @@ end
 exit 0 if ENV['DEVMODE101']
 
 EM.run do
-  if $git_repo
-    update_if_needed(true)
-  else
-    update_sync_client_if_needed do
-      update_if_needed(true)
+  update_if_needed(true) do
+    if $opts[:once]
+      EM.stop
+      exit 0
+    else
+      schedule_next_update
     end
   end
 end
