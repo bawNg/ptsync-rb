@@ -1,6 +1,15 @@
 # encoding: utf-8
 
 if __FILE__ == $0
+  if ENV['OS'] == 'Windows_NT'
+    if File.directory?('../bin') && File.directory?('../lib') && File.directory?('../src')
+      begin
+        exec File.join(Dir.getwd, '..', 'bin', 'ruby'), 'ptsync.rb', *ARGV
+      rescue
+        puts "Bad news, looks like you are using a really outdated ptsync-rb windows package. Please download the latest package from: https://github.com/bawNg/ptsync-rb/releases"
+      end
+    end
+  end
   puts "This file is not meant to be run directly. You need to run ptsync.rb instead."
   exit 1
 end
