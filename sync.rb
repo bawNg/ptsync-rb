@@ -122,10 +122,7 @@ def fetch_hashes
     @hashes_last_modified = Time.parse(http.response_header['LAST_MODIFIED'])
     @hashes_generated_at = file_hashes.delete('__DateGeneratedUTC')
     file_hashes.delete('__Server')
-    @file_hashes = {}
-    file_hashes.each do |file_name, file_info|
-      @file_hashes[file_name.encode('IBM437', 'UTF-8')] = file_info
-    end
+    @file_hashes = file_hashes
     save_cached_data
     yield if block_given?
   end
@@ -211,7 +208,7 @@ def download_files(sub_paths)
       log :red, "Download failed: #{sub_path.inspect} (#{error_message})"
       @downloading_file_count -= 1
       file.close
-      if error_code != 'IncorrectEndpoint' && error_code != 404
+      if error_code != 'IncorrectEndpoint' && error_code != 400 && error_code != 404
         @downloading_files << sub_path
       else
         @total_files_downloaded -= 1

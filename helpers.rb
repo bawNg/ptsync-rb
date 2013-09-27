@@ -55,8 +55,15 @@ def http_request(method, address, options={}, &block)
       if method == :head
         block.(http)
       else
-        doc = options[:parser] == 'raw' ? http.response : options[:parser].send(options[:parser_method], http.response)
-        catch(:done) { block.arity > 1 ? block.(http, doc) : block.(doc) }
+        result = case options[:parser]
+          when 'raw'
+            http.response
+          when JSON
+            JSON.parse(http.response.force_encoding('utf-8'))
+          else
+            options[:parser].send(options[:parser_method], http.response)
+        end
+        catch(:done) { block.arity > 1 ? block.(http, result) : block.(result) }
       end
     rescue Exception => ex
       next if ex.is_a? SystemExit
