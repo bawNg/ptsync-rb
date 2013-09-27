@@ -32,8 +32,8 @@ def log(*msgs)
   puts msgs.join(' ').colorize(colour)
 end
 
-def fail(message)
-  log :red, message
+def fail(message=nil)
+  log :red, message if message
   puts "Exiting..."
   EM.stop if EM.reactor_running?
   exit 1
@@ -61,13 +61,10 @@ def http_request(method, address, options={}, &block)
     rescue Exception => ex
       next if ex.is_a? SystemExit
       log :red, "Exception raised while handling http response: #{method} #{address} (#{ex.class.name})"
-      if options[:allow_failure]
-        log :red, "Exception: #{ex.message.gsub(/\r?\n/, ' ')}"
-      else
-        fail "Exception: #{ex.message.gsub(/\r?\n/, ' ')} (#{ex.class.name})"
-      end
+      log :red, "Exception: #{ex.message.gsub(/\r?\n/, ' ')} (#{ex.class.name})"
+      ex.backtrace.each {|line| puts line }
+      fail unless options[:allow_failure]
       #log :yellow, http.response
-      ex.backtrace.each {|line| print line + "\n" }
       @last_exception = ex
     end
   end
