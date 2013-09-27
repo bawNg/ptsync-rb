@@ -9,6 +9,8 @@ A cross platform NS2 play-tester syncing client written in ruby. Tested to be wo
 ## Windows
 Basic options can be set from the config.yml file. If you want to use any of the additional command like options, you can create a shortcut to ptsync which includes these options and use that to launch ptsync. If you do create a shortcut, make sure the working directory is correctly set to the folder you extracted pysync_rb to.
 
+A GUI interface will be added soon.
+
 ## Command line options:
             --verbose, -v:   Print extended information
                --once, -o:   Exit after syncing has completed
@@ -16,6 +18,7 @@ Basic options can be set from the config.yml file. If you want to use any of the
            --nodelete, -n:   Ignore additional/removed files
              --delete, -d:   Delete additional files without asking
          --noexcludes, -e:   No not sync the .excludes directory
+             --verify, -y:   Verify the integrity of all local files
             --dir, -p <s>:   Local NS2 Directory
     --afterupdate, -a <s>:   Command to run after each update
            --host, -h <s>:   S3 host address
