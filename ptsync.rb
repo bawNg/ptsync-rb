@@ -12,7 +12,7 @@ require 'json'
 require 'pp'
 require './helpers'
 
-PT_SYNC_VERSION = 0.7
+PT_SYNC_VERSION = 0.8
 
 $git_repo = File.directory?('./.git')
 
@@ -67,6 +67,7 @@ $opts = Trollop::options do
   opt :nodelete, 'Ignore additional/removed files', :short => 'n'
   opt :delete, 'Delete additional files without asking', :short => 'd'
   opt :noexcludes, 'No not sync the .excludes directory', :short => 'e'
+  opt :verify, 'Verify the integrity of all local files', :short => 'y'
   opt :dir, 'Local NS2 Directory', :type => :string, :short => 'p'
   opt :afterupdate, 'Command to run after each update', :type => :string, :short => 'a'
   opt :host, 'S3 host address', :type => :string, :short => 'h'

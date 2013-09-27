@@ -7,6 +7,7 @@ if __FILE__ == $0
         exec File.join(Dir.getwd, '..', 'bin', 'ruby'), 'ptsync.rb', *ARGV
       rescue
         puts "Bad news, looks like you are using a really outdated ptsync-rb windows package. Please download the latest package from: https://github.com/bawNg/ptsync-rb/releases"
+        exit 1
       end
     end
   end
@@ -75,16 +76,32 @@ $config.s3_item[:server] = $opts[:host] if $opts[:host]
 
 @local_file_info = {}
 
-if File.exists? 'cache.dat'
-  cache = JSON.parse(File.read('cache.dat')) rescue { }
+def load_cached_data(data)
+  cache = Marshal.load(data)
   @file_hashes = cache.hashes if cache.hashes?
-  @hashes_last_modified = Time.parse(cache.last_modified) if cache.last_modified?
+  @hashes_last_modified = cache.last_modified if cache.last_modified?
   @hashes_generated_at = cache.date_generated if cache.date_generated?
   @hashed_local_directory = cache.local_directory if cache.local_directory?
   if @hashed_local_directory && @hashed_local_directory == $config.local_directory
     @local_file_info = cache.local_files if cache.local_files?
   end
   log :yellow, "Loaded #{@file_hashes.size} remote hashes and #{@local_file_info.size} local hashes from cache" if $verbose
+rescue Exception => ex
+  log :red, "An error occurred while loading your local cache: #{ex.message} (#{ex.class.name})"
+  log :yellow, "Local cache will need to be rebuilt"
+end
+
+if File.exists? 'cache.dat'
+  data = File.binread('cache.dat')
+  if data[0] == '{' && data[-1] == '}'
+    log :cyan, '=' * 73
+    log :cyan, ' Looks like your local cache format is outdated and needs to be rebuilt.'
+    log :cyan, ' Please excuse the excess hashing time, this only needs to be once.'
+    log :cyan, '=' * 73
+    File.delete('cache.dat')
+  else
+    load_cached_data(data)
+  end
 end
 
 def save_cached_data
@@ -94,7 +111,7 @@ def save_cached_data
     cache[:local_directory] = @hashed_local_directory
     cache[:local_files] = @local_file_info
   end
-  open('cache.dat', 'w') {|f| f << JSON.fast_generate(cache) }
+  open('cache.dat', 'wb') {|f| f << Marshal.dump(cache) }
 end
 
 def fetch_hashes
@@ -105,7 +122,10 @@ def fetch_hashes
     @hashes_last_modified = Time.parse(http.response_header['LAST_MODIFIED'])
     @hashes_generated_at = file_hashes.delete('__DateGeneratedUTC')
     file_hashes.delete('__Server')
-    @file_hashes = file_hashes
+    @file_hashes = {}
+    file_hashes.each do |file_name, file_info|
+      @file_hashes[file_name.encode('IBM437', 'UTF-8')] = file_info
+    end
     save_cached_data
     yield if block_given?
   end
@@ -136,7 +156,7 @@ rescue Exception => ex
 end
 
 def download_files(sub_paths)
-  total_files_to_download = sub_paths.size
+  @total_files_downloaded = total_files_to_download = sub_paths.size
   log :yellow, "Downloading #{total_files_to_download} files..."
   @downloading_files = sub_paths
 
@@ -155,8 +175,8 @@ def download_files(sub_paths)
   @last_speeds = []
 
   download_complete = -> do
-    log :green, "Sync complete (#{total_files_to_download} files downloaded)"
-    after_update if $opts[:afterupdate]
+    log :green, "Sync complete (#@total_files_downloaded files downloaded)"
+    after_update if $opts[:afterupdate] unless @total_files_downloaded == 0
     yield if block_given?
   end
 
@@ -175,9 +195,13 @@ def download_files(sub_paths)
       FileUtils.mkpath(directory_path)
     end
 
-    @downloading_file_count += 1
+    unless (file = open(file_path, 'wb') rescue nil)
+      log :red, "Unable to write file: #{sub_path.inspect}"
+      @total_files_downloaded -= 1
+      next download_next_file.()
+    end
 
-    file = open(file_path, 'wb')
+    @downloading_file_count += 1
 
     item = Happening::S3::Item.new($config.s3.bucket, sub_path, $config.s3_item)
 
@@ -189,6 +213,8 @@ def download_files(sub_paths)
       file.close
       if error_code != 'IncorrectEndpoint' && error_code != 404
         @downloading_files << sub_path
+      else
+        @total_files_downloaded -= 1
       end
       download_next_file.()
     end
@@ -287,7 +313,9 @@ def delete_files(paths)
   paths.each do |path|
     log :yellow, "Deleting file: #{path}" if $verbose
     File.delete(path)
+    @local_file_info.delete(path[$config.local_directory.size..-1])
   end
+  save_cached_data
 end
 
 def check_for_redundant_files
@@ -319,9 +347,11 @@ def file_hash(sub_path)
   file_size = File.size(file_path)
   file_mtime = File.mtime(file_path).to_i
 
-  if cached_file = @local_file_info[sub_path]
-    if file_size == cached_file.fsize && file_mtime == cached_file.mtime
-      return cached_file['hash']
+  unless $opts[:verify]
+    if cached_file = @local_file_info[sub_path]
+      if file_size == cached_file.fsize && file_mtime == cached_file.mtime
+        return cached_file[:hash]
+      end
     end
   end
 
