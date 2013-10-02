@@ -93,12 +93,12 @@ def http_request(method, address, options={}, &block)
 end
 
 def sync_client_update_available
-  log "Checking if PTSync-rb is up to date..."
+  log "Checking if PTSync-rb is up to date..." if $verbose
   http_request :get, 'http://germ.intoxicated.co.za/ns2/ptsync/version.json', allow_failure: true do |http, response|
     if response
       yield response['version'] > PT_SYNC_VERSION, response['files']
     else
-      log :red, "Warning: Auto update version check failed! (code: #{http.response_header.status})"
+      log :yellow, "Warning: Client auto update version check failed! (code: #{http.response_header.status})"
       yield false
     end
   end

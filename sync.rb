@@ -20,9 +20,13 @@ require 'digest/md5'
 require 'yaml'
 require './config'
 
+if $windows
+  require 'win32ole'
+  $wmi = WIN32OLE.connect("winmgmts://")
+end
+
 Dir.chdir('../') if $packaged
 
-#YAML::ENGINE.yamler = 'syck'
 Encoding.default_external = 'utf-8'
 
 initialize_config
@@ -76,6 +80,15 @@ $config.s3_item = {
 $config.s3_item[:server] = $opts[:host] if $opts[:host]
 
 @local_file_info = {}
+
+def running_ns2_processes
+  if $windows
+    escaped_path = $config.local_directory.gsub('/', '\\').gsub('\\', '\\\\\\\\')
+    $wmi.ExecQuery("SELECT * FROM win32_process WHERE ExecutablePath LIKE '#{escaped_path}%'").each.map(&:Name)
+  else
+    [] #TODO: linux support
+  end
+end
 
 def load_cached_data(data)
   cache = Marshal.load(data)
@@ -206,9 +219,10 @@ def download_files(sub_paths)
     item = Happening::S3::Item.new($config.s3.bucket, sub_path, $config.s3_item)
 
     failed = proc do |http|
-      error_code = http.response_header['X_AMZ_ERROR_CODE'] || http.response_header.status
-      error_message = http.response_header['X_AMZ_ERROR_MESSAGE'] || "status: #{http.response_header.status}"
-      log :red, "Download failed: #{sub_path.inspect} (encoding: #{sub_path.encoding}, #{error_message})"
+      http_status = http.response_header.status
+      error_code = http.response_header['X_AMZ_ERROR_CODE'] || 'None'
+      error_message = http.response_header['X_AMZ_ERROR_MESSAGE'] || 'Unknown error'
+      log :red, "Download failed: #{sub_path.inspect} (code: #{error_code}, message: #{error_message}, status: #{http_status})"
       @downloading_file_count -= 1
       file.close
       if error_code != 'IncorrectEndpoint' && error_code != 400 && error_code != 404
@@ -397,7 +411,9 @@ def check_files
     yield if block_given?
   else
     download_files(files_to_download) do
-      yield if block_given?
+      check_files do
+        yield if block_given?
+      end
     end
   end
 end
@@ -411,7 +427,7 @@ def schedule_next_update
       return
     end
   end
-  log :yellow, "Checking for updates again in 3 minutes"
+  log :yellow, "Will check for updates again after 3 minutes" if $verbose
   EM.add_timer(3.minutes) do
     update_if_needed do
       schedule_next_update
@@ -419,7 +435,18 @@ def schedule_next_update
   end
 end
 
-def update_if_needed(force=false)
+def update_if_needed(force=false, &block)
+  unless $opts[:ignorerunning]
+    if (running_process_names = running_ns2_processes).present?
+      unless running_process_names == @running_process_names
+        log :red, "Updating will only start once the following application(s) have been closed: #{running_process_names.to_sentence}"
+        @running_process_names = running_process_names
+      end
+      return EM.add_timer(5) { update_if_needed(force, &block) }
+    end
+    @running_process_names = nil
+  end
+
   update_hashes_if_needed do |updated_hashes|
     if force || updated_hashes
       check_files do

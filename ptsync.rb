@@ -28,6 +28,7 @@ if ENV['OS'] == 'Windows_NT'
       end
     end
   end
+  $windows = true
 else
   require 'colorize'
 end
@@ -63,12 +64,13 @@ $argv = ARGV.dup
 $opts = Trollop::options do
   opt :verbose, 'Print extended information', :short => 'v'
   opt :once, 'Exit after syncing has completed', :short => 'o'
-  opt :createdir, 'Creates the local NS2 directory', :short => 'c'
+  opt :createdir, 'Create the local NS2 directory', :short => 'c'
   opt :nodelete, 'Ignore additional/removed files', :short => 'n'
   opt :delete, 'Delete additional files without asking', :short => 'd'
-  opt :noexcludes, 'No not sync the .excludes directory', :short => 'e'
+  opt :noexcludes, 'Do not sync the .excludes directory', :short => 'e'
+  opt :ignorerunning, 'Ignore any running NS2 applications', :short => 'r'
   opt :verify, 'Verify the integrity of all local files', :short => 'y'
-  opt :dir, 'Local NS2 Directory', :type => :string, :short => 'p'
+  opt :dir, 'Local NS2 directory', :type => :string, :short => 'p'
   opt :afterupdate, 'Command to run after each update', :type => :string, :short => 'a'
   opt :host, 'S3 host address', :type => :string, :short => 'h'
   opt :idkey, 'S3 ID key', :type => :string, :short => 'i'
