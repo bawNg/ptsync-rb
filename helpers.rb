@@ -24,6 +24,23 @@ class Hash
   end
 end
 
+class Time
+  def distance_in_words
+    distance_of_time_in_words((Time.now - self).abs)
+  end
+end
+
+def distance_of_time_in_words(seconds)
+  return 'less than 1 second' if seconds < 1
+  unit_names = %w[ weeks days hours minutes seconds ]
+  unit_sizes = [ 7, 24, 60, 60 ]
+  units = unit_sizes.reverse.inject [seconds] do |result, unit_size|
+    result[0, 0] = result.shift.to_i.divmod(unit_size)
+    result
+  end
+  units.map.with_index.reject {|n, _| n == 0 }.map {|n, i| "#{n} #{unit_names[i][0..(n < 2 ? -2 : -1)]}" }.join(', ')
+end
+
 def log(*msgs)
   colour = msgs.first.is_a?(Symbol) ? msgs.shift : :default
   colour = :reset if colour == :yellow && ENV['OS'] == 'Windows_NT'
@@ -34,6 +51,7 @@ end
 
 def fail(message=nil)
   log :red, message if message
+  $exiting = true
   puts "Exiting..."
   EM.stop if EM.reactor_running?
   exit 1
