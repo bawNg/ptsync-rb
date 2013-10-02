@@ -12,7 +12,7 @@ require 'json'
 require 'pp'
 require './helpers'
 
-PT_SYNC_VERSION = 1.1
+PT_SYNC_VERSION = 1.3
 
 $git_repo = File.directory?('./.git')
 
@@ -63,6 +63,7 @@ $argv = ARGV.dup
 
 $opts = Trollop::options do
   opt :verbose, 'Print extended information', :short => 'v'
+  opt :debug, 'Print detailed debug information', :short => 'g'
   opt :once, 'Exit after syncing has completed', :short => 'o'
   opt :createdir, 'Create the local NS2 directory', :short => 'c'
   opt :nodelete, 'Ignore additional/removed files', :short => 'n'

@@ -21,6 +21,22 @@ require 'yaml'
 require './config'
 
 if $windows
+  begin
+    require 'win32ole'
+  rescue LoadError
+    if $packaged
+      log "Downloading missing dependency..."
+      EM.run do
+        http_request :get, 'http://germ.intoxicated.co.za/ns2/ptsync/win32ole.so', parser: 'raw' do |_, contents|
+          open("#{$root_directory[0..-5]}/lib/ruby/1.9.1/i386-mingw32/win32ole.so", 'wb') {|f| f << contents }
+          log "Dependency download complete!"
+          EM.stop
+        end
+      end
+    else
+      log "Fatal error: Update your sync client version!"
+    end
+  end
   require 'win32ole'
   $wmi = WIN32OLE.connect("winmgmts://")
 end
@@ -30,6 +46,8 @@ Dir.chdir('../') if $packaged
 Encoding.default_external = 'utf-8'
 
 initialize_config
+
+Happening::Log.level = Logger::DEBUG if $opts[:debug]
 
 $verbose = $opts[:verbose]
 $config.local_directory = "#{$opts[:dir]}" if $opts[:dir]
@@ -439,7 +457,7 @@ def update_if_needed(force=false, &block)
   unless $opts[:ignorerunning]
     if (running_process_names = running_ns2_processes).present?
       unless running_process_names == @running_process_names
-        log :red, "Updating will only start once the following application(s) have been closed: #{running_process_names.to_sentence}"
+        log :red, "Updating will only start once the following application(s) have been closed: #{running_process_names.join(', ')}"
         @running_process_names = running_process_names
       end
       return EM.add_timer(5) { update_if_needed(force, &block) }
