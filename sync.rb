@@ -101,7 +101,7 @@ $config.s3_item[:server] = $opts[:host] if $opts[:host]
 
 def running_ns2_processes
   if $windows
-    escaped_path = $config.local_directory.gsub('/', '\\').gsub('\\', '\\\\\\\\')
+    escaped_path = $config.local_directory.gsub('/', '\\').gsub('\\', '\\\\\\\\') + '\\\\'
     $wmi.ExecQuery("SELECT * FROM win32_process WHERE ExecutablePath LIKE '#{escaped_path}%'").each.map(&:Name)
   else
     [] #TODO: linux support
@@ -184,13 +184,17 @@ rescue Exception => ex
   log :red, "Error while executing afterupdate command: #{ex.message} (#{ex.class.name})"
 end
 
-def download_files(sub_paths)
-  @total_files_downloaded = total_files_to_download = sub_paths.size
+def download_files(sub_paths_and_sizes)
+  total_files_to_download = sub_paths_and_sizes.size
   log :yellow, "Downloading #{total_files_to_download} files..."
-  @downloading_files = sub_paths
+  @queued_files = sub_paths_and_sizes.sort_by {|_, size| -size }
 
+  @total_bytes = @queued_files.map(&:second).sum
+  @bytes_downloaded = 0
   @downloading_file_count = 0
   @downloaded_file_count = 0
+
+  @started_downloading_at = Time.now
 
   if $config.max_speed?
     @max_decisecond_speed = $config.max_speed / 10.0
@@ -204,18 +208,18 @@ def download_files(sub_paths)
   @last_speeds = []
 
   download_complete = -> do
-    log :green, "Sync complete (#@total_files_downloaded files downloaded)"
-    after_update if $opts[:afterupdate] unless @total_files_downloaded == 0
+    log :green, "Sync complete. #@downloaded_file_count files downloaded in #{@started_downloading_at.distance_in_words}."
+    after_update if $opts[:afterupdate] unless @downloaded_file_count == 0
     yield if block_given?
   end
 
   download_next_file = -> do
-    if @downloading_files.size == 0
+    if @queued_files.size == 0
       download_complete.() if @downloading_file_count == 0
       next
     end
 
-    sub_path = @downloading_files.shift
+    sub_path, byte_size = @queued_files.shift
     file_path = File.join($config.local_directory, sub_path)
 
     directory_path = File.dirname(file_path)
@@ -224,11 +228,10 @@ def download_files(sub_paths)
       FileUtils.mkpath(directory_path)
     end
 
-    log :yellow, "Starting download: #{sub_path}" if $verbose
+    log :yellow, "Starting download: #{sub_path} (#{byte_size} bytes)" if $verbose
 
     unless (file = open(file_path, 'wb') rescue nil)
       log :red, "Unable to write file: #{sub_path.inspect}"
-      @total_files_downloaded -= 1
       next download_next_file.()
     end
 
@@ -237,102 +240,116 @@ def download_files(sub_paths)
     item = Happening::S3::Item.new($config.s3.bucket, sub_path, $config.s3_item)
 
     failed = proc do |http|
+      next if $exiting
       http_status = http.response_header.status
-      error_code = http.response_header['X_AMZ_ERROR_CODE'] || 'None'
-      error_message = http.response_header['X_AMZ_ERROR_MESSAGE'] || 'Unknown error'
-      log :red, "Download failed: #{sub_path.inspect} (code: #{error_code}, message: #{error_message}, status: #{http_status})"
+      api_response = Hash[(http.response.scan(/\<([^>]+)\>([^<]+?)\<\/([^>]+)\>/).map {|arr| arr.take(2) })] rescue { }
+      error_code = http.response_header['X_AMZ_ERROR_CODE'] || api_response['Code'] || 'Unknown'
+      error_message = http.response_header['X_AMZ_ERROR_MESSAGE'] || api_response['Message'] || 'Error'
+      log :red, "Download failed: #{sub_path.inspect} (status: #{http_status}, #{error_code}: #{error_message})"
+      case error_code
+        when 'InvalidAccessKeyId'
+          fail "Your S3 ID key is invalid, edit your config file and correct it before trying again."
+        when 'SignatureDoesNotMatch'
+          fail "Your S3 secret key is invalid, edit your config file and correct it before trying again."
+      end
       @downloading_file_count -= 1
       file.close
       if error_code != 'IncorrectEndpoint' && error_code != 400 && error_code != 404
-        @downloading_files << sub_path
+        @queued_files << [sub_path, byte_size]
       else
-        @total_files_downloaded -= 1
+        @total_bytes -= byte_size
       end
       download_next_file.()
     end
 
-    item.head(on_error: failed) do |http|
-      file_size = byte_size = http.response_header['CONTENT_LENGTH'].to_i
-      unit = 'bytes'
-      if file_size >= 1024
-        file_size /= 1024.0
-        unit = 'KB'
+    file_size = byte_size
+    unit = 'bytes'
+    if file_size >= 1024
+      file_size /= 1024.0
+      unit = 'KB'
+    end
+    if file_size >= 1024
+      file_size /= 1024.0
+      unit = 'MB'
+    end
+
+    log :magenta, "Downloading #{sub_path} (#{'%.2f' % file_size} #{unit})" if $verbose
+
+    succeeded = proc do
+      log :magenta, "Download complete: #{sub_path}" if $verbose
+
+      @downloading_file_count -= 1
+      @downloaded_file_count += 1
+
+      file.close #TODO: correct the mtime?
+
+      if @downloading_file_count < 6 || byte_size < 20.megabytes
+        download_next_file.()
       end
-      if file_size >= 1024
-        file_size /= 1024.0
-        unit = 'MB'
+    end
+
+    current_second = @current_second
+    bytes_written = 0
+
+    item.get(on_success: succeeded, on_error: failed).stream do |chunk|
+      file << chunk
+
+      chunk_size = chunk.bytesize
+      bytes_written += chunk_size
+      @bytes_downloaded += chunk_size
+
+      now = Time.now.to_i
+
+      unless current_second == now
+        log :magenta, "[#{bytes_written}/#{byte_size}] Downloading #{sub_path} (#{'%.2f' % (bytes_written / byte_size.to_f * 100)}%)" if $verbose
+        current_second = now
       end
 
-      succeeded = proc do
-        log :magenta, "Download complete: #{sub_path}" if $verbose
-        @downloading_file_count -= 1
-        @downloaded_file_count += 1
-        file.close #TODO: correct the mtime?
+      if @max_decisecond_speed
+        current_decisecond = (Time.now.to_f * 10).round
 
-        if @downloading_file_count < 6 || byte_size < 20.megabytes
-          download_next_file.()
-        end
-      end
-
-      log :magenta, "Downloading #{sub_path} (#{'%.2f' % file_size} #{unit})"
-
-      current_second = @current_second
-      bytes_written = 0
-
-      item.get(on_success: succeeded, on_error: failed).stream do |chunk|
-        file << chunk
-
-        chunk_size = chunk.bytesize
-        bytes_written += chunk_size
-
-        now = Time.now.to_i
-
-        unless current_second == now
-          log :magenta, "[#{bytes_written}/#{byte_size}] Downloading #{sub_path} (#{'%.2f' % (bytes_written / byte_size.to_f * 100)}%)" if $verbose
-          current_second = now
-        end
-
-        if @max_decisecond_speed
-          current_decisecond = (Time.now.to_f * 10).round
-
-          if @current_decisecond == current_decisecond
-            @decisecond_speed += chunk_size
-          else
-            @current_decisecond = current_decisecond
-            @decisecond_started_at = Time.now.to_f
-            @decisecond_speed = chunk_size
-          end
-
-          if @decisecond_speed >= @max_decisecond_speed
-            decisecond_ends_at = @decisecond_started_at + 0.1
-            sleep_time = decisecond_ends_at - Time.now.to_f
-
-            excess_speed = @decisecond_speed - @max_decisecond_speed
-            sleep_time += excess_speed / @max_decisecond_speed * 0.1
-
-            sleep(sleep_time) if sleep_time > 0.01
-          end
-        end
-
-        if @current_second == now
-          @current_speed += chunk_size
+        if @current_decisecond == current_decisecond
+          @decisecond_speed += chunk_size
         else
-          @last_speeds << @current_speed
-          @last_speeds.shift if @last_speeds.size > 3
-          last_speed = 0
-          @last_speeds.each {|speed| last_speed += speed }
-          last_speed /= @last_speeds.size.to_f
-          @current_speed = 0
-          @current_second = now
-          percentage = @downloaded_file_count / total_files_to_download.to_f * 100
-          log :cyan, "[#{'%.2f' % percentage}%] Downloading #@downloading_file_count files - #{'%.2f' % (last_speed / 1024.0)} KB/s"
+          @current_decisecond = current_decisecond
+          @decisecond_started_at = Time.now.to_f
+          @decisecond_speed = chunk_size
+        end
+
+        if @decisecond_speed >= @max_decisecond_speed
+          decisecond_ends_at = @decisecond_started_at + 0.1
+          sleep_time = decisecond_ends_at - Time.now.to_f
+
+          excess_speed = @decisecond_speed - @max_decisecond_speed
+          sleep_time += excess_speed / @max_decisecond_speed * 0.1
+
+          sleep(sleep_time) if sleep_time > 0.01
         end
       end
 
-      if @downloading_file_count < $config.max_concurrency
-        if @downloading_file_count < 6 || byte_size < 20.megabytes
-          download_next_file.()
-        end
+      if @current_second == now
+        @current_speed += chunk_size
+      else
+        @last_speeds << @current_speed
+        @last_speeds.shift if @last_speeds.size > 3
+        last_speed = 0
+        @last_speeds.each {|speed| last_speed += speed }
+        last_speed /= @last_speeds.size.to_f
+        @current_speed = 0
+        @current_second = now
+        bytes_remaining = @total_bytes.to_f - @bytes_downloaded
+        percentage = @bytes_downloaded / @total_bytes.to_f * 100
+        incomplete_count = @downloading_file_count + @queued_files.size
+        download_status = "#{'%.2f' % percentage}% - Downloading #@downloading_file_count/#{incomplete_count} file(s) concurrently"
+        download_status << " - #{'%.2f' % (last_speed / 1024.0)} KB/s"
+        log :cyan, download_status
+        log "Estimated time remaining: #{distance_of_time_in_words(bytes_remaining / last_speed)}" if last_speed > 0
+      end
+    end
+
+    if @downloading_file_count < $config.max_concurrency
+      if @downloading_file_count < 6 || byte_size < 20.megabytes
+        download_next_file.()
       end
     end
   end
@@ -407,10 +424,10 @@ def check_files
     if File.exists?(file_path)
       hash = file_hash(sub_path)
       if info['hash'] != hash
-        files_to_download << sub_path[1..-1]
+        files_to_download << [sub_path[1..-1], info['size'].to_i]
       end
     else
-      files_to_download << sub_path[1..-1]
+      files_to_download << [sub_path[1..-1], info['size'].to_i]
     end
     if Time.now - last_update_at >= 1
       log :magenta, "Checked #{i+1}/#{@file_hashes.size} files (#{'%.2f' % ((i+1) / @file_hashes.size.to_f * 100)}%)"
@@ -422,14 +439,14 @@ def check_files
 
   save_cached_data
 
-  log :yellow, "Hashing and comparing files took #{'%.2f' % (Time.now - started_at)} seconds."
+  log :yellow, "Hashing and comparing files took #{started_at.distance_in_words}."
 
   if files_to_download.size < 1
     log :green, "All #{@file_hashes.size} files are up to date."
     yield if block_given?
   else
     download_files(files_to_download) do
-      check_files do
+      update_if_needed(true) do
         yield if block_given?
       end
     end
