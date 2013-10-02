@@ -14,7 +14,13 @@ DEFAULT_CONFIG = {
 }
 
 def load_config
-  YAML.load_file('config.yml')
+  contents = File.read('config.yml')
+  if contents =~ /^local_directory:\s+".+"\s*$/
+    log :yellow, 'Rewriting config.yml file after correcting quotation marks (do not use double quotes around your path)'
+    contents.gsub!(/^(local_directory:\s+)"(.+)"\s*$/) { "#$1'#$2'" }
+    open('config.yml', 'w') {|f| f << contents }
+  end
+  YAML.load(contents)
 rescue Exception => ex
   fail "Unable to parse config file: #{ex.message}"
 end
