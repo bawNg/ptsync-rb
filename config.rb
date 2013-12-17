@@ -1,9 +1,7 @@
 DEFAULT_CONFIG = {
     'hash_server' => 'http://67.164.96.34:81/hashes.txt',
     'max_files_removed_without_warning' => 50,
-    'download_type' => 's3',
     's3' => {
-        'host' => 's3-website-us-east-1.amazonaws.com',
         'id_key' => 'id key goes here',
         'secret_key' => 'secret key goes here',
         'bucket' => 'ns2build'
