@@ -73,20 +73,22 @@ def http_request(method, address, options={}, &block)
       if method == :head
         block.(http)
       else
+        response_body = http.response.force_encoding('utf-8')
+        response_body.slice!(3) if response_body[0..2] == "\xEF\xBB\xBF"
         result = case options[:parser]
           when 'raw'
-            http.response
+            response_body
           when JSON
-            JSON.parse(http.response.force_encoding('utf-8'))
+            JSON.parse(response_body)
           else
-            options[:parser].send(options[:parser_method], http.response)
+            options[:parser].send(options[:parser_method], response_body)
         end
         catch(:done) { block.arity > 1 ? block.(http, result) : block.(result) }
       end
     rescue Exception => ex
       next if ex.is_a? SystemExit
       log :red, "Exception raised while handling http response: #{method} #{address} (#{ex.class.name})"
-      log :red, "Exception: #{ex.message.gsub(/\r?\n/, ' ')} (#{ex.class.name})"
+      log :red, "Exception: #{ex.message.gsub(/\r?\n/, ' ')[0..512]} (#{ex.class.name})"
       ex.backtrace.each {|line| puts line }
       fail unless options[:allow_failure]
       #log :yellow, http.response
@@ -112,7 +114,7 @@ end
 
 def sync_client_update_available
   log "Checking if PTSync-rb is up to date..." if $verbose
-  http_request :get, 'http://germ.intoxicated.co.za/ns2/ptsync/version.json', allow_failure: true do |http, response|
+  http_request :get, "#{UPDATE_URL_BASE}/version.json", allow_failure: true do |http, response|
     if response
       yield response['version'] > PT_SYNC_VERSION, response['files']
     else
@@ -127,6 +129,7 @@ def relaunch_application
   Dir.chdir($root_directory)
   command = $packaged ? File.join($root_directory, '..', 'bin', 'ruby') : 'ruby'
   exec_args = [command, $0, *$argv]
+  exec_args << "--ipcport#$ipc_port" if $ipc_port
   exec *exec_args
 rescue Exception => ex
   log :red, "Error while relaunching: #{exec_args.inspect}"
@@ -136,19 +139,38 @@ rescue Exception => ex
 end
 
 def update_sync_client_if_needed
+  on :updating_client
   sync_client_update_available do |update_available, files|
     if update_available
       log :green, "There is a new version of PTSync-rb available!"
+      if $git_repo
+        log :red, "Auto-updating is not available since you are using a git repo. Use `git pull` to update your version."
+        yield if block_given?
+        next
+      end
+      target_directory = $root_directory # not packaged
+      target_directory = File.dirname($root_directory) if $packaged # one level up from src directory
+      if $packaged
+        # This wrapper binary for the GUI application is never updated since it would be in use
+        files << 'ptsync_gui.exe' unless File.exists? "#$root_directory/../ptsync_gui.exe"
+      end
       downloaded_files = 0
       files.each do |file_name|
         log :yellow, "Downloading PTSync-rb update file: #{file_name}" if $verbose
-        http_request :get, 'http://germ.intoxicated.co.za/ns2/ptsync/' + file_name, parser: 'raw' do |http, contents|
-          open("#$root_directory/#{file_name}", 'wb') {|f| f << contents }
+        http_request :get, "#{UPDATE_URL_BASE}/#{file_name}", parser: 'raw' do |http, contents|
+          target_file_directory = target_directory
+          target_file_directory = target_directory + '/src' if $packaged && File.extname(file_name) == '.rb'
+          open("#{target_file_directory}/#{file_name}", 'wb') {|f| f << contents }
           downloaded_files += 1
           log :cyan, "[#{downloaded_files}/#{files.size}] Sync client files updated"
+          on :updating_client, downloaded_files / files.size * 100
           if downloaded_files == files.size
             log :green, "PTSync-rb updated successfully! Relaunching new version..."
-            relaunch_application
+            if $ipc_port
+              on :restarting
+            else
+              relaunch_application
+            end
           end
         end
       end
@@ -156,4 +178,45 @@ def update_sync_client_if_needed
       yield if block_given?
     end
   end
+end
+
+def on(event_name, *args, &block)
+  $callbacks ||= {}
+  if block_given?
+    ($callbacks[event_name] ||= []) << block
+  elsif (callbacks = $callbacks[event_name])
+    callbacks.each {|cb| cb.(*args) }
+  end
+end
+
+def on_once(event_name, &block)
+  raise 'on_once can only be used to register callbacks' unless block_given?
+  ($callbacks ||= {})[event_name] ||= []
+  callback_wrapper = lambda do |*args|
+    $callbacks[event_name].delete(callback_wrapper)
+    block.(*args)
+  end
+  $callbacks[event_name] << callback_wrapper
+end
+
+def human_readable_byte_size(byte_size)
+  file_size = byte_size
+  unit = 'bytes'
+  if file_size >= 1024
+    file_size /= 1024.0
+    unit = 'KB'
+  end
+  if file_size >= 1024
+    file_size /= 1024.0
+    unit = 'MB'
+  end
+  if file_size >= 1024
+    file_size /= 1024.0
+    unit = 'GB'
+  end
+  "#{'%.2f' % file_size} #{unit}"
+end
+
+def frontend?
+  Object.const_defined?(:IpcServer) && !!IpcServer.connection
 end

@@ -12,25 +12,18 @@ require 'json'
 require 'pp'
 require './helpers'
 
-PT_SYNC_VERSION = 1.4
+PT_SYNC_BRANCH = :beta
+PT_SYNC_VERSION = 1.6
+
+UPDATE_URL_BASE = "http://germ.intoxicated.co.za/ns2/ptsync#{'/beta' if PT_SYNC_BRANCH == :beta}"
+
+$stdout.sync = $stderr.sync = true
+
+$root_directory = Dir.getwd
 
 $git_repo = File.directory?('./.git')
-
-if ENV['OS'] == 'Windows_NT'
-  require 'win32console'
-  require 'term/ansicolor'
-  if defined? Term::ANSIColor
-    class String
-      include Term::ANSIColor
-      def colorize(color, *args)
-        color = color.is_a?(Hash) ? color[:color] : color
-        color == :default ? self : send(color, *args)
-      end
-    end
-  end
-  $windows = true
-else
-  require 'colorize'
+if !$git_repo && File.directory?('../bin') && File.directory?('../lib') && File.directory?('../src')
+  $packaged = true
 end
 
 Signal.trap 'INT' do
@@ -38,12 +31,6 @@ Signal.trap 'INT' do
   $exiting = true
   EM.stop if EM.reactor_running?
   exit 0
-end
-
-$git_repo = File.directory?('./.git')
-
-if !$git_repo && File.directory?('../bin') && File.directory?('../lib') && File.directory?('../src')
-  $packaged = true
 end
 
 if $packaged
@@ -57,7 +44,55 @@ if $packaged
   end
 end
 
-$root_directory = Dir.getwd
+if ENV['OS'] == 'Windows_NT'
+  require 'win32console'
+  require 'term/ansicolor'
+  if defined? Term::ANSIColor
+    class String
+      include Term::ANSIColor
+      def colorize(color, *args)
+        return self if $ipc_port
+        color = color.is_a?(Hash) ? color[:color] : color
+        color == :default ? self : send(color, *args)
+      end
+    end
+  end
+
+  begin
+    require 'win32ole'
+  rescue LoadError
+    if $packaged
+      log "Downloading missing dependency..."
+      EM.run do
+        http_request :get, 'http://germ.intoxicated.co.za/ns2/ptsync/win32ole.so', parser: 'raw' do |_, contents|
+          open("#{$root_directory[0..-5]}/lib/ruby/1.9.1/i386-mingw32/win32ole.so", 'wb') {|f| f << contents }
+          log "Dependency download complete!"
+          EM.stop
+        end
+      end
+      require 'win32ole'
+    else
+      log :red, "Fatal error: Update your sync client version!"
+      exit 1
+    end
+  end
+
+  $wmi = WIN32OLE.connect("winmgmts://")
+
+  if (ipc_port_arg = ARGV.detect {|arg| arg.start_with? '--ipcport' })
+    ARGV.delete(ipc_port_arg)
+    $ipc_port = ipc_port_arg[9..-1].to_i
+    if $ipc_port > 0
+      require './ipc_server'
+    else
+      log :red, "Warning: Invalid --ipcport command line argument!"
+    end
+  end
+
+  $windows = true
+else
+  require 'colorize'
+end
 
 $argv = ARGV.dup
 
@@ -72,7 +107,8 @@ $opts = Trollop::options do
   opt :ignorerunning, 'Ignore any running NS2 applications', :short => 'r'
   opt :verify, 'Verify the integrity of all local files', :short => 'y'
   opt :dir, 'Local NS2 directory', :type => :string, :short => 'p'
-  opt :afterupdate, 'Command to run after each update', :type => :string, :short => 'a'
+  opt :beforeupdate, 'Command to run before an update starts', :type => :string, :short => 't'
+  opt :afterupdate, 'Command to run after an update', :type => :string, :short => 'a'
   opt :host, 'S3 host address', :type => :string, :short => 'h'
   opt :idkey, 'S3 ID key', :type => :string, :short => 'i'
   opt :secretkey, 'S3 secret key', :type => :string, :short => 's'
@@ -81,13 +117,21 @@ $opts = Trollop::options do
   opt :maxspeed, 'Rough download speed limit in KB/s', :default => -1, :short => 'm'
 end
 
-unless $git_repo
-  EM.run do
-    update_sync_client_if_needed do
-      EM.stop
-    end
+def start_application
+  return if $application_started
+  $application_started = true
+  update_sync_client_if_needed do
+    on :initializing
+    log "Starting ptsync-rb v#{PT_SYNC_VERSION}"
+    require './sync'
   end
 end
 
-log "Starting ptsync-rb v#{PT_SYNC_VERSION}"
-require './sync'
+EM.run do
+  if $ipc_port
+    log "[IPC] Listening on port #$ipc_port for client connections"
+    EM.start_server '127.0.0.1', $ipc_port, IpcServer
+  else
+    start_application
+  end
+end

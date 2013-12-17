@@ -20,27 +20,6 @@ require 'digest/md5'
 require 'yaml'
 require './config'
 
-if $windows
-  begin
-    require 'win32ole'
-  rescue LoadError
-    if $packaged
-      log "Downloading missing dependency..."
-      EM.run do
-        http_request :get, 'http://germ.intoxicated.co.za/ns2/ptsync/win32ole.so', parser: 'raw' do |_, contents|
-          open("#{$root_directory[0..-5]}/lib/ruby/1.9.1/i386-mingw32/win32ole.so", 'wb') {|f| f << contents }
-          log "Dependency download complete!"
-          EM.stop
-        end
-      end
-    else
-      log "Fatal error: Update your sync client version!"
-    end
-  end
-  require 'win32ole'
-  $wmi = WIN32OLE.connect("winmgmts://")
-end
-
 Dir.chdir('../') if $packaged
 
 Encoding.default_external = 'utf-8'
@@ -50,10 +29,10 @@ initialize_config
 Happening::Log.level = Logger::DEBUG if $opts[:debug]
 
 $verbose = $opts[:verbose]
-$config.local_directory = "#{$opts[:dir]}" if $opts[:dir]
-$config.s3.bucket = "#{$opts[:bucket]}" if $opts[:bucket]
-$config.max_concurrency = $opts[:concurrency] if $opts[:concurrency]
-$config.max_speed = $opts[:maxspeed] if $opts[:maxspeed]
+$config.local_directory = $opts[:dir] if $opts[:dir]
+$config.s3.bucket = $opts[:bucket] if $opts[:bucket] unless $opts[:bucket] == 'ns2build'
+$config.max_concurrency = $opts[:concurrency] if !$config.max_concurrency? || $opts[:concurrency] != 48
+$config.max_speed = $opts[:maxspeed] if !$config.max_speed? || $opts[:max_speed] != -1
 $config.max_speed *= 1024.0 if $config.max_speed? && $config.max_speed > 0
 
 if !$config.s3.id_key? || $config.s3.id_key == '' || $config.s3.id_key == 'id key goes here'
@@ -104,7 +83,11 @@ def running_ns2_processes
     escaped_path = $config.local_directory.gsub('/', '\\').gsub('\\', '\\\\\\\\') + '\\\\'
     $wmi.ExecQuery("SELECT * FROM win32_process WHERE ExecutablePath LIKE '#{escaped_path}%'").each.map(&:Name)
   else
-    [] #TODO: linux support
+    local_ns2_path = $config.local_directory.gsub('\\', '/')
+    local_ns2_path << '/' unless local_ns2_path.ends_with? '/'
+    pids = Dir.foreach('/proc').select {|pid| pid =~ /^\d+$/ && File.readable?("/proc/#{pid}/exe") }
+    paths = pids.map {|pid| File.readlink("/proc/#{pid}/exe") }.select {|path| path.starts_with?(local_ns2_path) }
+    paths.map {|path| path[local_ns2_path.size+1..-1] }
   end
 end
 
@@ -148,6 +131,7 @@ end
 
 def fetch_hashes
   log :yellow, "Downloading new file hashes..."
+  on :downloading_hashes
 
   http_request :get, $config.hash_server do |http, file_hashes|
     log :green, "Hashes have been updated"
@@ -172,9 +156,17 @@ def update_hashes_if_needed
       fetch_hashes { yield true if block_given? }
     else
       log :yellow, "Local cache is already up to date"
+      on :up_to_date
       yield false if block_given?
     end
   end
+end
+
+def before_update
+  log :yellow, "Executing beforeupdate command: #{$opts[:beforeupdate]}"
+  system($opts[:beforeupdate])
+rescue Exception => ex
+  log :red, "Error while executing beforeupdate command: #{ex.message} (#{ex.class.name})"
 end
 
 def after_update
@@ -182,6 +174,11 @@ def after_update
   system($opts[:afterupdate])
 rescue Exception => ex
   log :red, "Error while executing afterupdate command: #{ex.message} (#{ex.class.name})"
+end
+
+#TODO: allow pipelining
+def download_file(sub_path, size)
+  #TODO: implement split file downloads, cache parts to partial.dat
 end
 
 def download_files(sub_paths_and_sizes)
@@ -196,20 +193,22 @@ def download_files(sub_paths_and_sizes)
 
   @started_downloading_at = Time.now
 
-  if $config.max_speed?
-    @max_decisecond_speed = $config.max_speed / 10.0
-    @current_decisecond = (Time.now.to_f * 10).round
-    @decisecond_started_at = Time.now.to_f
-    @decisecond_speed = 0
-  end
+  on :sync_started, @total_bytes
+
+  @max_decisecond_speed = $config.max_speed / 10.0 if $config.max_speed?
+  @current_decisecond = (Time.now.to_f * 10).round
+  @decisecond_started_at = Time.now.to_f
+  @decisecond_speed = 0
 
   @current_second = Time.now.to_i
   @current_speed = 0
+  @last_speed = 0
   @last_speeds = []
 
+  @time_remaining = nil
+
   download_complete = -> do
-    log :green, "Sync complete. #@downloaded_file_count files downloaded in #{@started_downloading_at.distance_in_words}."
-    after_update if $opts[:afterupdate] unless @downloaded_file_count == 0
+    on :sync_complete, @downloaded_file_count, Time.now - @started_downloading_at
     yield if block_given?
   end
 
@@ -262,18 +261,7 @@ def download_files(sub_paths_and_sizes)
       download_next_file.()
     end
 
-    file_size = byte_size
-    unit = 'bytes'
-    if file_size >= 1024
-      file_size /= 1024.0
-      unit = 'KB'
-    end
-    if file_size >= 1024
-      file_size /= 1024.0
-      unit = 'MB'
-    end
-
-    log :magenta, "Downloading #{sub_path} (#{'%.2f' % file_size} #{unit})" if $verbose
+    log :magenta, "Downloading #{sub_path} (#{human_readable_byte_size(byte_size)})" if $verbose
 
     succeeded = proc do
       log :magenta, "Download complete: #{sub_path}" if $verbose
@@ -305,45 +293,51 @@ def download_files(sub_paths_and_sizes)
         current_second = now
       end
 
-      if @max_decisecond_speed
-        current_decisecond = (Time.now.to_f * 10).round
-
-        if @current_decisecond == current_decisecond
-          @decisecond_speed += chunk_size
-        else
-          @current_decisecond = current_decisecond
-          @decisecond_started_at = Time.now.to_f
-          @decisecond_speed = chunk_size
-        end
-
-        if @decisecond_speed >= @max_decisecond_speed
-          decisecond_ends_at = @decisecond_started_at + 0.1
-          sleep_time = decisecond_ends_at - Time.now.to_f
-
-          excess_speed = @decisecond_speed - @max_decisecond_speed
-          sleep_time += excess_speed / @max_decisecond_speed * 0.1
-
-          sleep(sleep_time) if sleep_time > 0.01
-        end
-      end
-
       if @current_second == now
         @current_speed += chunk_size
       else
         @last_speeds << @current_speed
         @last_speeds.shift if @last_speeds.size > 3
-        last_speed = 0
-        @last_speeds.each {|speed| last_speed += speed }
-        last_speed /= @last_speeds.size.to_f
+        @last_speed = 0
+        @last_speeds.each {|speed| @last_speed += speed }
+        @last_speed /= @last_speeds.size.to_f
         @current_speed = 0
-        @current_second = now
-        bytes_remaining = @total_bytes.to_f - @bytes_downloaded
-        percentage = @bytes_downloaded / @total_bytes.to_f * 100
+      end
+
+      current_decisecond = (Time.now.to_f * 10).round
+
+      unless @current_second == now && @current_decisecond == current_decisecond
+        current_speed = (@last_speed / 1024.0).round(2)
+        percentage = (@bytes_downloaded / @total_bytes.to_f * 100).round(2)
         incomplete_count = @downloading_file_count + @queued_files.size
-        download_status = "#{'%.2f' % percentage}% - Downloading #@downloading_file_count/#{incomplete_count} file(s) concurrently"
-        download_status << " - #{'%.2f' % (last_speed / 1024.0)} KB/s"
-        log :cyan, download_status
-        log "Estimated time remaining: #{distance_of_time_in_words(bytes_remaining / last_speed)}" if last_speed > 0
+        @time_remaining = @last_speed > 0 && ((@total_bytes.to_f - @bytes_downloaded) / @last_speed)
+      end
+
+      unless @current_second == now
+        log :cyan, "#{percentage}% - Downloading #@downloading_file_count/#{incomplete_count} file(s) concurrently - #{current_speed} KB/s"
+        log "Estimated time remaining: #{distance_of_time_in_words(@time_remaining)}" if @time_remaining
+        @current_second = now
+      end
+
+      if @current_decisecond == current_decisecond
+        @decisecond_speed += chunk_size
+      else
+        @current_decisecond = current_decisecond
+        @decisecond_started_at = Time.now.to_f
+        @decisecond_speed = chunk_size
+        percentage ||= (@bytes_downloaded / @total_bytes.to_f * 100).round(2)
+        incomplete_count ||= @downloading_file_count + @queued_files.size
+        on :sync_status, percentage, @downloading_file_count, incomplete_count, @bytes_downloaded, current_speed, @time_remaining
+      end
+
+      if @max_decisecond_speed && @decisecond_speed >= @max_decisecond_speed
+        decisecond_ends_at = @decisecond_started_at + 0.1
+        sleep_time = decisecond_ends_at - Time.now.to_f
+
+        excess_speed = @decisecond_speed - @max_decisecond_speed
+        sleep_time += excess_speed / @max_decisecond_speed * 0.1
+
+        sleep(sleep_time) if sleep_time > 0.01
       end
     end
 
@@ -368,6 +362,11 @@ def delete_files(paths)
 end
 
 def check_for_redundant_files
+  if $opts[:nodelete]
+    yield if block_given?
+    return
+  end
+
   log :yellow, "Checking for redundant files..."
   files_to_delete = Dir[File.join($config.local_directory, '**/*')].reject do |path|
     next true if $opts[:noexcludes] && path[$config.local_directory.size+1..-1] == '.excludes'
@@ -375,20 +374,31 @@ def check_for_redundant_files
   end
 
   if !$opts[:delete] && files_to_delete.size > $config.max_files_removed_without_warning
-    log :yellow, "First file that needs to be deleted: #{files_to_delete.first}" if $verbose
-    loop do
-      print "Are you sure you want to delete #{files_to_delete.size} files? [Y/N] "
-      case STDIN.gets
-        when /^ye?s?$/i
-          delete_files(files_to_delete)
-          break
-        when /^no?$/i
-          break
+    if frontend?
+      log "Requesting user confirmation from frontend to delete #{files_to_delete.size} files"
+      on_once :delete_files_confirmation_received do |can_delete|
+        delete_files(files_to_delete) if can_delete
+        yield if block_given?
+      end
+      on :request_delete_files_confirmation, files_to_delete.size
+      return
+    else
+      log :yellow, "First file that needs to be deleted: #{files_to_delete.first}" if $verbose
+      loop do
+        print "Are you sure you want to delete #{files_to_delete.size} files? [Y/N] "
+        case STDIN.gets
+          when /^ye?s?$/i
+            delete_files(files_to_delete)
+            break
+          when /^no?$/i
+            break
+        end
       end
     end
   elsif files_to_delete.size > 0
     delete_files(files_to_delete)
   end
+  yield if block_given?
 end
 
 def file_hash(sub_path)
@@ -410,45 +420,66 @@ def file_hash(sub_path)
 end
 
 def check_files
-  check_for_redundant_files unless $opts[:nodelete]
+  on :checking_files
 
-  log :yellow, "Hashing and comparing #{@file_hashes.size} files..."
+  check_for_redundant_files do
+    log :yellow, "Hashing and comparing #{@file_hashes.size} files..."
 
-  started_at = Time.now
-  last_update_at = started_at
+    started_at = Time.now
+    files_to_download = []
 
-  files_to_download = []
-  @file_hashes.each.with_index do |(sub_path, info), i|
-    next if $opts[:noexcludes] && sub_path[/^\/?([^\/]+)/, 1] == '.excludes'
-    file_path = File.join($config.local_directory, sub_path)
-    if File.exists?(file_path)
-      hash = file_hash(sub_path)
-      if info['hash'] != hash
-        files_to_download << [sub_path[1..-1], info['size'].to_i]
+    hashing_complete = -> do
+      @hashed_local_directory = $config.local_directory
+
+      save_cached_data
+
+      log :yellow, "Hashing and comparing files took #{started_at.distance_in_words}."
+
+      if files_to_download.size < 1
+        log :green, "All #{@file_hashes.size} files are up to date."
+        on :up_to_date
+        yield if block_given?
+      else
+        download_files(files_to_download) do
+          update_if_needed(true) do
+            yield if block_given?
+          end
+        end
       end
-    else
-      files_to_download << [sub_path[1..-1], info['size'].to_i]
     end
-    if Time.now - last_update_at >= 1
-      log :magenta, "Checked #{i+1}/#{@file_hashes.size} files (#{'%.2f' % ((i+1) / @file_hashes.size.to_f * 100)}%)"
-      last_update_at = Time.now
+
+    EM.defer do
+      last_update_at = started_at
+      @file_hashes.each.with_index do |(sub_path, info), i|
+        next if $opts[:noexcludes] && sub_path[/^\/?([^\/]+)/, 1] == '.excludes'
+        file_path = File.join($config.local_directory, sub_path)
+        if File.exists?(file_path)
+          hash = file_hash(sub_path)
+          if info['hash'] != hash
+            files_to_download << [sub_path[1..-1], info['size'].to_i]
+          end
+        else
+          files_to_download << [sub_path[1..-1], info['size'].to_i]
+        end
+        if Time.now - last_update_at >= 0.1
+          EM.schedule { on :hashing_status, i+1, @file_hashes.size }
+          last_update_at = Time.now
+        end
+      end
+      EM.schedule(&hashing_complete)
     end
   end
+end
 
-  @hashed_local_directory = $config.local_directory
-
-  save_cached_data
-
-  log :yellow, "Hashing and comparing files took #{started_at.distance_in_words}."
-
-  if files_to_download.size < 1
-    log :green, "All #{@file_hashes.size} files are up to date."
-    yield if block_given?
+def count_down_until_next_check
+  return if @paused
+  if @seconds_remaining > 0
+    on :time_remaining_until_next_check, @seconds_remaining
+    @seconds_remaining -= 1
+    @count_down_timer = EM::Timer.new(1, method(:count_down_until_next_check))
   else
-    download_files(files_to_download) do
-      update_if_needed(true) do
-        yield if block_given?
-      end
+    update_if_needed do
+      schedule_next_update
     end
   end
 end
@@ -463,11 +494,8 @@ def schedule_next_update
     end
   end
   log :yellow, "Will check for updates again after 3 minutes" if $verbose
-  EM.add_timer(3.minutes) do
-    update_if_needed do
-      schedule_next_update
-    end
-  end
+  @seconds_remaining = 3.minutes
+  count_down_until_next_check
 end
 
 def update_if_needed(force=false, &block)
@@ -476,12 +504,14 @@ def update_if_needed(force=false, &block)
       unless running_process_names == @running_process_names
         log :red, "Updating will only start once the following application(s) have been closed: #{running_process_names.join(', ')}"
         @running_process_names = running_process_names
+        on :waiting_for_processes, running_process_names.join(', ')
       end
       return EM.add_timer(5) { update_if_needed(force, &block) }
     end
     @running_process_names = nil
   end
 
+  on :checking_for_updates
   update_hashes_if_needed do |updated_hashes|
     if force || updated_hashes
       check_files do
@@ -493,15 +523,44 @@ def update_if_needed(force=false, &block)
   end
 end
 
+@last_console_update_at = Time.now
+
+on :pause do |pause|
+  @paused = pause
+  if pause
+    log "Pause requested by user"
+    @seconds_remaining = 0
+    @count_down_timer.cancel
+  else
+    log "Resume requested by user"
+    count_down_until_next_check
+  end
+end
+
+on :hashing_status do |hashed_file_count, total_file_count|
+  if Time.now - @last_console_update_at >= 1
+    percentage_complete = (hashed_file_count / total_file_count.to_f * 100).round(2)
+    log :magenta, "Checked #{hashed_file_count}/#{total_file_count} files (#{percentage_complete}%)"
+    @last_console_update_at = Time.now
+  end
+end
+
+on :sync_started do |total_bytes|
+  before_update if $opts[:beforeupdate] unless total_bytes == 0
+end
+
+on :sync_complete do |downloaded_file_count, duration|
+  log :green, "Sync complete. #{downloaded_file_count} files downloaded in #{distance_of_time_in_words(duration)}."
+  after_update if $opts[:afterupdate] unless downloaded_file_count == 0
+end
+
 exit 0 if ENV['DEVMODE101']
 
-EM.run do
-  update_if_needed(true) do
-    if $opts[:once]
-      EM.stop
-      exit 0
-    else
-      schedule_next_update
-    end
+update_if_needed(true) do
+  if $opts[:once]
+    EM.stop
+    exit 0
+  else
+    schedule_next_update
   end
 end
