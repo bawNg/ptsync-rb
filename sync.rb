@@ -55,8 +55,8 @@ if !$config.local_directory? || $config.local_directory == '' || $config.local_d
   exit 1
 end
 
-$config.local_directory.slice!(-1) if $config.local_directory =~ /[\/\\]$/
-$config.local_directory.gsub!("\\", "/")
+$config.local_directory = $config.local_directory[0..-2] if $config.local_directory =~ /[\/\\]$/
+$config.local_directory = $config.local_directory.gsub("\\", "/")
 
 unless File.directory? $config.local_directory
   if $opts[:createdir]
@@ -66,6 +66,11 @@ unless File.directory? $config.local_directory
     log :red, "The configured local NS2 directory does not exist! Check that your configuration is correct or create the directory before syncing to it."
     exit 1
   end
+end
+
+if File.dirname(File.expand_path(__FILE__)).starts_with? $config.local_directory
+  log :red, "You are running ptsync-rb out of your local game directory, please move ptsync-rb to another location before running it again."
+  exit 1
 end
 
 $config.s3_item = {
@@ -150,7 +155,13 @@ def update_hashes_if_needed
   end
 
   log :yellow, "Checking for NS2 updates..."
-  http_request :head, $config.hash_server do |http, _| #TODO: change to a GET request with cache conditional headers so that operation is atomic
+  http_request :head, $config.hash_server, allow_failure: true do |http, _| #TODO: change to a GET request with cache conditional headers so that operation is atomic
+    unless http.response_header['LAST_MODIFIED']
+      log :red, "The hashes file is currently unavailable on the UWE server!"
+      on :up_to_date
+      yield false if block_given?
+      next
+    end
     last_modified = Time.parse(http.response_header['LAST_MODIFIED'])
     if last_modified > @hashes_last_modified
       fetch_hashes { yield true if block_given? }
@@ -416,7 +427,7 @@ def file_hash(sub_path)
 
   hash = Digest::MD5.file(file_path).hexdigest
   @local_file_info[sub_path] = { fsize: file_size, mtime: file_mtime, hash: hash }
-  return hash
+  hash
 end
 
 def check_files

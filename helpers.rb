@@ -73,8 +73,9 @@ def http_request(method, address, options={}, &block)
       if method == :head
         block.(http)
       else
-        response_body = http.response.force_encoding('utf-8')
-        response_body.slice!(3) if response_body[0..2] == "\xEF\xBB\xBF"
+        response_body = http.response.force_encoding('binary')
+        response_body = response_body[3..-1] if response_body[0..2] == "\xEF\xBB\xBF"
+        response_body = response_body.force_encoding('utf-8')
         result = case options[:parser]
           when 'raw'
             response_body
@@ -90,7 +91,11 @@ def http_request(method, address, options={}, &block)
       log :red, "Exception raised while handling http response: #{method} #{address} (#{ex.class.name})"
       log :red, "Exception: #{ex.message.gsub(/\r?\n/, ' ')[0..512]} (#{ex.class.name})"
       ex.backtrace.each {|line| puts line }
-      fail unless options[:allow_failure]
+      if options[:allow_failure]
+        catch(:done) { block.arity > 1 ? block.(http, nil) : block.(nil) }
+      else
+        fail
+      end
       #log :yellow, http.response
       @last_exception = ex
     end
