@@ -36,12 +36,12 @@ $config.max_speed = $opts[:maxspeed] if !$config.max_speed? || $opts[:max_speed]
 $config.max_speed *= 1024.0 if $config.max_speed? && $config.max_speed > 0
 
 if !$config.s3.id_key? || $config.s3.id_key == '' || $config.s3.id_key == 'id key goes here'
-  log :red, "S3 ID key is configuration missing! You need to either add id_key to the s3 section in the config.yml file or use the --id-key command line option."
+  log :red, "S3 ID key is configuration missing! You need to either add id_key to the s3 section in the config.yml file or use the --idkey command line option."
   exit 1
 end
 
 if !$config.s3.secret_key? || $config.s3.secret_key == '' || $config.s3.secret_key == 'secret key goes here'
-  log :red, "S3 secret key configuration is missing! You need to either add secret_key to the s3 section in the config.yml file or use the --secret-key command line option."
+  log :red, "S3 secret key configuration is missing! You need to either add secret_key to the s3 section in the config.yml file or use the --secretkey command line option."
   exit 1
 end
 
@@ -51,7 +51,7 @@ if !$config.s3.bucket? || $config.s3.bucket == ''
 end
 
 if !$config.local_directory? || $config.local_directory == '' || $config.local_directory == 'your local ns2 directory'
-  log :red, "Local NS2 directory configuration is missing! You need to either add bucket to the s3 section in the config.yml file or use the --bucket command line option."
+  log :red, "Local NS2 directory configuration is missing! You need to either add bucket to the s3 section in the config.yml file or use the --dir command line option."
   exit 1
 end
 
@@ -365,8 +365,12 @@ end
 def delete_files(paths)
   log :yellow, "Deleting #{paths.size} files..."
   paths.each do |path|
-    log :yellow, "Deleting file: #{path}" if $verbose
-    File.delete(path)
+    if File.file? path
+      log :yellow, "Deleting file: #{path}" if $verbose
+      File.delete(path)
+    else
+      log :yellow, "File cannot be deleted: #{path} (does not exist)" if $verbose
+    end
     @local_file_info.delete(path[$config.local_directory.size..-1])
   end
   save_cached_data
