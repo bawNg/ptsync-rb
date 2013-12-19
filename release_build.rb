@@ -127,7 +127,7 @@ def compare_files
   sub_paths = file_paths.map {|path| path[$local_directory.size+1..-1] }
 
   if @local_file_info.present?
-    @files_to_delete = @local_file_info.reject {|sub_path, _| sub_path.include? sub_path }
+    @files_to_delete = @local_file_info.reject {|sub_path, _| sub_paths.include? sub_path }
     @local_file_info.reject! {|sub_path, _| @files_to_delete[sub_path] }
     log "#{@files_to_delete.size} files have been deleted from disk"
   end
@@ -172,6 +172,14 @@ end
 def delete_file(sub_path)
   log "Deleting file: #{sub_path}" if $verbose
   @delete_attempts[sub_path] += 1
+  started_at = Time.now
+  attempt_complete = proc do
+    if @files_to_delete.size > 0
+      delete_file(@files_to_delete.shift)
+    elsif @files_to_delete.size + @delete_attempts.size == 0
+      @delete_callback.() if @delete_callback
+    end
+  end
   delete_failed = proc do |http|
     http_status = http.response_header.status
     api_response = Hash[(http.response.scan(/\<([^>]+)\>([^<]+?)\<\/([^>]+)\>/).map {|arr| arr.take(2) })] rescue { }
@@ -179,18 +187,14 @@ def delete_file(sub_path)
     error_message = http.response_header['X_AMZ_ERROR_MESSAGE'] || api_response['Message'] || 'Error'
     log "Delete failed: #{sub_path} (attempt: #{@delete_attempts[sub_path]}, status: #{http_status}, #{error_code}: #{error_message})"
     @files_to_delete << sub_path
+    attempt_complete.()
   end
-  started_at = Time.now
   item = Happening::S3::Item.new($opts[:bucket], sub_path, protocol: 'http', aws_access_key_id: $opts[:idkey], aws_secret_access_key: $opts[:secretkey])
   item.delete(on_error: delete_failed) do
     log "File deleted: #{sub_path} (took #{'%.2f' % (Time.now - started_at)} seconds)" if $verbose
     @delete_attempts.delete(sub_path)
     @deleted_file_count += 1
-    if @files_to_delete.size > 0
-      delete_file(@files_to_delete.shift)
-    elsif @files_to_delete.size + @delete_attempts.size == 0
-      @delete_callback.() if @delete_callback
-    end
+    attempt_complete.()
   end
 end
 
@@ -212,6 +216,15 @@ end
 def upload_file(sub_path)
   log "Uploading file: #{sub_path} (#{@local_file_info[sub_path].fsize} bytes)" if $verbose
   @upload_attempts[sub_path] += 1
+  started_at = Time.now
+  attempt_complete = proc do
+    if @files_to_upload.size > 0
+      upload_file(@files_to_upload.shift)
+    elsif @files_to_upload.size + @upload_attempts.size == 0
+      log "Upload complete. #@uploaded_file_count file uploaded in #{'%.2f' % (Time.now - started_at)} seconds"
+      @upload_callback.() if @upload_callback
+    end
+  end
   upload_failed = proc do |http|
     http_status = http.response_header.status
     api_response = Hash[(http.response.scan(/\<([^>]+)\>([^<]+?)\<\/([^>]+)\>/).map {|arr| arr.take(2) })] rescue { }
@@ -219,20 +232,15 @@ def upload_file(sub_path)
     error_message = http.response_header['X_AMZ_ERROR_MESSAGE'] || api_response['Message'] || 'Error'
     log "Upload failed: #{sub_path} (attempt: #{@upload_attempts[sub_path]}, status: #{http_status}, #{error_code}: #{error_message})"
     @files_to_upload << sub_path
+    attempt_complete.()
   end
-  started_at = Time.now
   item = Happening::S3::Item.new($opts[:bucket], sub_path, protocol: 'http', aws_access_key_id: $opts[:idkey], aws_secret_access_key: $opts[:secretkey])
   #item.store("#$local_directory/#{sub_path}", on_error: upload_failed) do # streaming uploads are disabled until blocking IO error can be solved
   item.put(File.binread("#$local_directory/#{sub_path}"), on_error: upload_failed) do
     log "File uploaded: #{sub_path} (took #{'%.2f' % (Time.now - started_at)} seconds)" if $verbose
     @upload_attempts.delete(sub_path)
     @uploaded_file_count += 1
-    if @files_to_upload.size > 0
-      upload_file(@files_to_upload.shift)
-    elsif @files_to_upload.size + @upload_attempts.size == 0
-      log "Upload complete. #@uploaded_file_count file uploaded in #{'%.2f' % (Time.now - started_at)} seconds"
-      @upload_callback.() if @upload_callback
-    end
+    attempt_complete.()
   end
 end
 
