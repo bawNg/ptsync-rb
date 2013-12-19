@@ -96,8 +96,8 @@ unless $local_directory = $opts[:dir]
   exit 1
 end
 
-$local_directory = $local_directory[0..-2] if $local_directory =~ /[\/\\]$/
 $local_directory = $local_directory.gsub("\\", "/")
+$local_directory = $local_directory[0..-2] if $local_directory =~ /[\/\\]$/
 
 @local_file_info = {}
 
@@ -214,7 +214,8 @@ def upload_file(sub_path)
   end
   started_at = Time.now
   item = Happening::S3::Item.new($opts[:bucket], sub_path, protocol: 'http', aws_access_key_id: $opts[:idkey], aws_secret_access_key: $opts[:secretkey])
-  item.store("#$local_directory/#{sub_path}", on_error: upload_failed) do
+  #item.store("#$local_directory/#{sub_path}", on_error: upload_failed) do # streaming uploads are disabled until blocking IO error can be solved
+  item.put(File.binread("#$local_directory/#{sub_path}"), on_error: upload_failed) do
     log "File uploaded: #{sub_path} (took #{'%.2f' % (Time.now - started_at)} seconds)" if $verbose
     @upload_attempts.delete(sub_path)
     @uploaded_file_count += 1
