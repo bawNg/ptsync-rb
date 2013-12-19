@@ -114,7 +114,7 @@ end
 def save_cache
   log "Saving cached data to disk..."
   cache = { local_files: @local_file_info, generated_at: Time.now }
-  cache_data = Marshal.load(File.binread('builder_cache.dat'))
+  cache_data = File.file?('builder_cache.dat') ? Marshal.load(File.binread('builder_cache.dat')) : {}
   cache_data[$local_directory] = cache
   open('builder_cache.dat', 'wb') {|f| f << Marshal.dump(cache_data) }
 end
