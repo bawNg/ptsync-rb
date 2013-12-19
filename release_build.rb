@@ -122,9 +122,9 @@ end
 def compare_files
   file_paths = Dir[File.join($local_directory, '**/*')].reject {|path| File.directory?(path) }
 
-  file_paths.reject! {|path| path[$local_directory.size, 9] == '.excludes' } if $opts[:noexcludes]
+  file_paths.reject! {|path| path[$local_directory.size+1, 9] == '.excludes' } if $opts[:noexcludes]
 
-  sub_paths = file_paths.map {|path| path[$local_directory.size..-1] }
+  sub_paths = file_paths.map {|path| path[$local_directory.size+1..-1] }
 
   if @local_file_info.present?
     @files_to_delete = @local_file_info.reject {|sub_path, _| sub_path.include? sub_path }
@@ -140,7 +140,7 @@ def compare_files
 
   last_update_at = started_at
   file_paths.each.with_index do |file_path, i|
-    sub_path = file_path[$local_directory.size..-1]
+    sub_path = file_path[$local_directory.size+1..-1]
 
     file_size = File.size(file_path)
     file_mtime = File.mtime(file_path)
