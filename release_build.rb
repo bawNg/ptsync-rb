@@ -173,7 +173,11 @@ def delete_file(sub_path)
   log "Deleting file: #{sub_path}" if $verbose
   @delete_attempts[sub_path] += 1
   delete_failed = proc do |http|
-    log "Delete failed: #{sub_path} (attempt: #{@delete_attempts[sub_path]}, status: #{http.response_header.status})"
+    http_status = http.response_header.status
+    api_response = Hash[(http.response.scan(/\<([^>]+)\>([^<]+?)\<\/([^>]+)\>/).map {|arr| arr.take(2) })] rescue { }
+    error_code = http.response_header['X_AMZ_ERROR_CODE'] || api_response['Code'] || 'Unknown'
+    error_message = http.response_header['X_AMZ_ERROR_MESSAGE'] || api_response['Message'] || 'Error'
+    log "Delete failed: #{sub_path} (attempt: #{@delete_attempts[sub_path]}, status: #{http_status}, #{error_code}: #{error_message})"
     @files_to_delete << sub_path
   end
   started_at = Time.now
@@ -209,7 +213,11 @@ def upload_file(sub_path)
   log "Uploading file: #{sub_path} (#{@local_file_info[sub_path].fsize} bytes)" if $verbose
   @upload_attempts[sub_path] += 1
   upload_failed = proc do |http|
-    log "Upload failed: #{sub_path} (attempt: #{@upload_attempts[sub_path]}, status: #{http.response_header.status})"
+    http_status = http.response_header.status
+    api_response = Hash[(http.response.scan(/\<([^>]+)\>([^<]+?)\<\/([^>]+)\>/).map {|arr| arr.take(2) })] rescue { }
+    error_code = http.response_header['X_AMZ_ERROR_CODE'] || api_response['Code'] || 'Unknown'
+    error_message = http.response_header['X_AMZ_ERROR_MESSAGE'] || api_response['Message'] || 'Error'
+    log "Upload failed: #{sub_path} (attempt: #{@upload_attempts[sub_path]}, status: #{http_status}, #{error_code}: #{error_message})"
     @files_to_upload << sub_path
   end
   started_at = Time.now
