@@ -191,7 +191,7 @@ def delete_file(sub_path)
 end
 
 def remove_deleted_files(&block)
-  if @files_to_delete.try(:empty?)
+  unless @files_to_delete.present?
     log "There are no files which need to be deleted"
     yield if block_given?
     return
