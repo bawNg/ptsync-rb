@@ -103,9 +103,10 @@ $local_directory = $local_directory[0..-2] if $local_directory =~ /[\/\\]$/
 
 def load_cache
   cache_data = Marshal.load(File.binread('builder_cache.dat'))
-  return unless @cache = cache_data[$local_directory]
-  @local_file_info = @cache.local_files if @cache.local_files?
-  log "Loaded #{@cache.local_files.size} local hashes from cache"
+  return unless cache = cache_data[$local_directory]
+  @local_file_info = cache.local_files if cache.local_files?
+  @generated_at = cache.generated_at if cache.generated_at?
+  log "Loaded #{cache.local_files.size} local hashes from cache"
 rescue Exception => ex
   log "An error occurred while loading your local cache: #{ex.message} (#{ex.class.name})"
   log "Local cache will need to be rebuilt"
@@ -113,7 +114,7 @@ end
 
 def save_cache
   log "Saving cached data to disk..."
-  cache = { local_files: @local_file_info, generated_at: Time.now }
+  cache = { local_files: @local_file_info, generated_at: @generated_at }
   cache_data = File.file?('builder_cache.dat') ? Marshal.load(File.binread('builder_cache.dat')) : {}
   cache_data[$local_directory] = cache
   open('builder_cache.dat', 'wb') {|f| f << Marshal.dump(cache_data) }
@@ -127,8 +128,9 @@ def compare_files
   sub_paths = file_paths.map {|path| path[$local_directory.size+1..-1] }
 
   if @local_file_info.present?
-    @files_to_delete = @local_file_info.reject {|sub_path, _| sub_paths.include? sub_path }
-    @local_file_info.reject! {|sub_path, _| @files_to_delete[sub_path] }
+    removed_file_info = @local_file_info.reject {|sub_path, _| sub_paths.include? sub_path }
+    @local_file_info.reject! {|sub_path, _| removed_file_info[sub_path] }
+    @files_to_delete = removed_file_info.keys
     log "#{@files_to_delete.size} files have been deleted from disk"
   end
 
@@ -164,7 +166,7 @@ def compare_files
     end
   end
 
-  @hashed_local_directory = $local_directory
+  @generated_at = Time.now
 
   log "#{@files_to_upload.size}/#{file_paths.size} files have been updated. Hashing and comparing took #{started_at.distance_in_words}."
 end
@@ -235,7 +237,7 @@ def upload_file(sub_path)
     attempt_complete.()
   end
   item = Happening::S3::Item.new($opts[:bucket], sub_path, protocol: 'http', aws_access_key_id: $opts[:idkey], aws_secret_access_key: $opts[:secretkey])
-  #item.store("#$local_directory/#{sub_path}", on_error: upload_failed) do # streaming uploads are disabled until blocking IO error can be solved
+  #item.store("#$local_directory/#{sub_path}", on_error: upload_failed) do |info| # streaming uploads are disabled until blocking IO error can be solved
   item.put(File.binread("#$local_directory/#{sub_path}"), on_error: upload_failed) do
     log "File uploaded: #{sub_path} (took #{'%.2f' % (Time.now - started_at)} seconds)" if $verbose
     @upload_attempts.delete(sub_path)
@@ -260,7 +262,7 @@ def upload_changes(&block)
 end
 
 def write_hashes_files
-  hashes = { __Server: 'BUILDER', __DateGeneratedUTC: @cache.generated_at.strftime('%y-%m-%d-%H-%M-%S') }
+  hashes = { __Server: 'BUILDER', __DateGeneratedUTC: @generated_at.strftime('%y-%m-%d-%H-%M-%S') }
   @local_file_info.each do |sub_path, info|
     hashes["/#{sub_path}"] = { size: info[:fsize], time: info[:mtime].strftime('%Y-%m-%d %H:%M:%S'), hash: info[:hash] }
   end
