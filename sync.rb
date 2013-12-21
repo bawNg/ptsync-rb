@@ -389,8 +389,8 @@ def check_for_redundant_files
     File.directory?(path) || @file_hashes.include?(path[$config.local_directory.size..-1])
   end
 
-  if @previous_hashes
-    files_to_delete.select! {|path| @previous_hashes.include? path } unless $opts[:deleteall]
+  if @previous_hashes && !$opts[:deleteall]
+    files_to_delete.select! {|path| @previous_hashes.include? path[$config.local_directory.size+1..-1] }
   end
 
   if !$opts[:delete] && files_to_delete.size > $config.max_files_removed_without_warning
