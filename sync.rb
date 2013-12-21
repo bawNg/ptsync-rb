@@ -55,8 +55,8 @@ if !$config.local_directory? || $config.local_directory == '' || $config.local_d
   exit 1
 end
 
-$config.local_directory = $config.local_directory[0..-2] if $config.local_directory =~ /[\/\\]$/
 $config.local_directory = $config.local_directory.gsub("\\", "/")
+$config.local_directory = $config.local_directory[0..-2] if $config.local_directory =~ /[\/\\]$/
 
 unless File.directory? $config.local_directory
   if $opts[:createdir]
@@ -143,6 +143,7 @@ def fetch_hashes
     @hashes_last_modified = Time.parse(http.response_header['LAST_MODIFIED'])
     @hashes_generated_at = file_hashes.delete('__DateGeneratedUTC')
     file_hashes.delete('__Server')
+    @previous_hashes = @file_hashes
     @file_hashes = file_hashes
     save_cached_data
     yield if block_given?
@@ -386,6 +387,10 @@ def check_for_redundant_files
   files_to_delete = Dir[File.join($config.local_directory, '**/*')].reject do |path|
     next true if $opts[:noexcludes] && path[$config.local_directory.size+1..-1] == '.excludes'
     File.directory?(path) || @file_hashes.include?(path[$config.local_directory.size..-1])
+  end
+
+  if @previous_hashes
+    files_to_delete.select! {|path| @previous_hashes.include? path } unless $opts[:deleteall]
   end
 
   if !$opts[:delete] && files_to_delete.size > $config.max_files_removed_without_warning

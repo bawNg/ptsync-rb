@@ -13,7 +13,7 @@ require 'pp'
 require './helpers'
 
 PT_SYNC_BRANCH = :beta
-PT_SYNC_VERSION = 1.8
+PT_SYNC_VERSION = 1.9
 
 UPDATE_URL_BASE = "http://germ.intoxicated.co.za/ns2/ptsync#{'/beta' if PT_SYNC_BRANCH == :beta}"
 
@@ -101,6 +101,7 @@ $opts = Trollop::options do
   opt :debug, 'Print detailed debug information', :short => 'g'
   opt :once, 'Exit after syncing has completed', :short => 'o'
   opt :createdir, 'Create the local NS2 directory', :short => 'c'
+  opt :deleteall, 'Delete files which were not part of the last build', :short => 'l'
   opt :nodelete, 'Ignore additional/removed files', :short => 'n'
   opt :delete, 'Delete additional files without asking', :short => 'd'
   opt :noexcludes, 'Do not sync the .excludes directory', :short => 'e'
