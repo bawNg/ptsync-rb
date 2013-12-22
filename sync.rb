@@ -378,7 +378,7 @@ def delete_files(paths)
 end
 
 def check_for_redundant_files
-  if $opts[:nodelete]
+  if $opts[:nodelete] || (!@previous_hashes && !$opts[:deleteall])
     yield if block_given?
     return
   end

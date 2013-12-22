@@ -13,7 +13,7 @@ require 'pp'
 require './helpers'
 
 PT_SYNC_BRANCH = :beta
-PT_SYNC_VERSION = 2.0
+PT_SYNC_VERSION = 2.1
 
 UPDATE_URL_BASE = "http://germ.intoxicated.co.za/ns2/ptsync#{'/beta' if PT_SYNC_BRANCH == :beta}"
 
