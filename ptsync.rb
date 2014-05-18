@@ -13,7 +13,7 @@ require 'pp'
 require './helpers'
 
 PT_SYNC_BRANCH = :beta
-PT_SYNC_VERSION = 2.2
+PT_SYNC_VERSION = 2.3
 
 UPDATE_URL_BASE = "http://41.86.98.15/ns2/ptsync#{'/beta' if PT_SYNC_BRANCH == :beta}"
 
