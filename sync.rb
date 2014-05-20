@@ -28,7 +28,7 @@ initialize_config
 
 Happening::Log.level = Logger::DEBUG if $opts[:debug]
 
-$verbose = $opts[:verbose]
+$verbose = $opts[:verbose] || $config.verbose?
 $config.local_directory = $opts[:dir] if $opts[:dir]
 $config.s3.bucket = $opts[:bucket] if $opts[:bucket] unless $opts[:bucket] == 'ns2build'
 $config.max_concurrency = $opts[:concurrency] if !$config.max_concurrency? || $opts[:concurrency] != 48
@@ -374,6 +374,7 @@ def delete_files(paths)
     end
     @local_file_info.delete(path[$config.local_directory.size..-1])
   end
+  #TODO: delete all empty directories which contained files before the delete
   save_cached_data
 end
 
